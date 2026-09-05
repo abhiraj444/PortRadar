@@ -124,6 +124,11 @@ export async function streamLlm({
   apiKey = '',
   model = '',
   baseUrl = '',
+  temperature = 0.2,
+  maxTokens = 4096,
+  topP = 0.95,
+  customHeaders = '',
+  customBodyParams = '',
   systemPrompt = '',
   prompt = '',
   reasoningMode = false,
@@ -141,15 +146,38 @@ export async function streamLlm({
     anthropic: 'claude-3-5-haiku-latest',
     groq: 'llama-3.3-70b-versatile',
     ollama: 'llama3',
-    openrouter: 'meta-llama/llama-3.3-70b-instruct'
+    openrouter: 'meta-llama/llama-3.3-70b-instruct',
+    custom: 'gpt-4o-mini'
   };
 
-  const selectedModel = model.trim() || defaultModels[provider] || 'gpt-4o-mini';
+  const selectedModel = model?.trim() || defaultModels[provider] || 'gpt-4o-mini';
+  const cleanBase = (baseUrl || '').trim().replace(/\/+$/, '');
+
+  // Parse custom headers if provided
+  const parsedCustomHeaders = {};
+  if (customHeaders && typeof customHeaders === 'string' && customHeaders.trim()) {
+    try {
+      Object.assign(parsedCustomHeaders, JSON.parse(customHeaders));
+    } catch (e) {
+      console.warn('Failed to parse customHeaders JSON:', e.message);
+    }
+  }
+
+  // Parse custom body parameters if provided
+  const parsedCustomBody = {};
+  if (customBodyParams && typeof customBodyParams === 'string' && customBodyParams.trim()) {
+    try {
+      Object.assign(parsedCustomBody, JSON.parse(customBodyParams));
+    } catch (e) {
+      console.warn('Failed to parse customBodyParams JSON:', e.message);
+    }
+  }
 
   // 1. Google Gemini SSE Streaming
   if (provider === 'gemini') {
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:streamGenerateContent?alt=sse&key=${apiKey}`;
-    const safeEndpoint = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:streamGenerateContent?alt=sse&key=***REDACTED***`;
+    const baseHost = cleanBase || 'https://generativelanguage.googleapis.com';
+    const endpoint = `${baseHost}/v1beta/models/${selectedModel}:streamGenerateContent?alt=sse&key=${apiKey}`;
+    const safeEndpoint = `${baseHost}/v1beta/models/${selectedModel}:streamGenerateContent?alt=sse&key=***REDACTED***`;
     
     const body = {
       contents: [
@@ -159,8 +187,11 @@ export async function streamLlm({
         }
       ],
       generationConfig: {
-        temperature: 0.2
-      }
+        temperature: typeof temperature === 'number' ? temperature : 0.2,
+        maxOutputTokens: typeof maxTokens === 'number' ? maxTokens : 4096,
+        topP: typeof topP === 'number' ? topP : 0.95
+      },
+      ...parsedCustomBody
     };
 
     onInputPayload({
@@ -170,12 +201,18 @@ export async function streamLlm({
       reasoningMode,
       systemPrompt,
       userPrompt: prompt,
+      parameters: { temperature, maxTokens, topP },
       timestamp: new Date().toISOString()
     });
 
+    const headers = {
+      'Content-Type': 'application/json',
+      ...parsedCustomHeaders
+    };
+
     const res = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body)
     });
 
@@ -216,13 +253,18 @@ export async function streamLlm({
 
   // 2. Anthropic Claude Streaming
   if (provider === 'anthropic') {
-    const endpoint = 'https://api.anthropic.com/v1/messages';
+    const baseHost = cleanBase || 'https://api.anthropic.com/v1';
+    const endpoint = baseHost.endsWith('/messages') ? baseHost : `${baseHost}/messages`;
+
     const body = {
       model: selectedModel,
-      max_tokens: 4096,
+      max_tokens: typeof maxTokens === 'number' ? maxTokens : 4096,
+      temperature: typeof temperature === 'number' ? temperature : 0.2,
+      top_p: typeof topP === 'number' ? topP : 0.95,
       stream: true,
       system: systemPrompt,
-      messages: [{ role: 'user', content: prompt }]
+      messages: [{ role: 'user', content: prompt }],
+      ...parsedCustomBody
     };
 
     onInputPayload({
@@ -232,16 +274,20 @@ export async function streamLlm({
       reasoningMode,
       systemPrompt,
       userPrompt: prompt,
+      parameters: { temperature, maxTokens, topP },
       timestamp: new Date().toISOString()
     });
 
+    const headers = {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      ...parsedCustomHeaders
+    };
+
     const res = await fetch(endpoint, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01'
-      },
+      headers,
       body: JSON.stringify(body)
     });
 
@@ -286,25 +332,27 @@ export async function streamLlm({
   }
 
   // 3. OpenAI-Compatible Streaming (OpenAI, Groq, OpenRouter, Ollama, Custom)
-  let endpoint = '';
-  const headers = { 'Content-Type': 'application/json' };
+  let baseHost = cleanBase;
+  if (!baseHost) {
+    if (provider === 'openai') baseHost = 'https://api.openai.com/v1';
+    else if (provider === 'groq') baseHost = 'https://api.groq.com/openai/v1';
+    else if (provider === 'openrouter') baseHost = 'https://openrouter.ai/api/v1';
+    else if (provider === 'ollama') baseHost = 'http://localhost:11434/v1';
+    else if (provider === 'custom') baseHost = 'https://your-custom-endpoint/v1';
+  }
 
-  if (provider === 'openai') {
-    endpoint = 'https://api.openai.com/v1/chat/completions';
+  const endpoint = baseHost.endsWith('/chat/completions') ? baseHost : `${baseHost}/chat/completions`;
+  const headers = { 
+    'Content-Type': 'application/json',
+    ...parsedCustomHeaders 
+  };
+
+  if (apiKey) {
     headers['Authorization'] = `Bearer ${apiKey}`;
-  } else if (provider === 'groq') {
-    endpoint = 'https://api.groq.com/openai/v1/chat/completions';
-    headers['Authorization'] = `Bearer ${apiKey}`;
-  } else if (provider === 'openrouter') {
-    endpoint = 'https://openrouter.ai/api/v1/chat/completions';
-    headers['Authorization'] = `Bearer ${apiKey}`;
-    headers['HTTP-Referer'] = 'http://localhost:8989';
-    headers['X-Title'] = 'PortRadar';
-  } else if (provider === 'ollama') {
-    endpoint = `${(baseUrl || 'http://localhost:11434').replace(/\/+$/, '')}/v1/chat/completions`;
-  } else if (provider === 'custom') {
-    endpoint = `${(baseUrl || '').replace(/\/+$/, '')}/chat/completions`;
-    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  }
+  if (provider === 'openrouter') {
+    if (!headers['HTTP-Referer']) headers['HTTP-Referer'] = 'http://localhost:8989';
+    if (!headers['X-Title']) headers['X-Title'] = 'PortRadar';
   }
 
   const body = {
@@ -314,7 +362,10 @@ export async function streamLlm({
       { role: 'user', content: prompt }
     ],
     stream: true,
-    temperature: 0.2
+    temperature: typeof temperature === 'number' ? temperature : 0.2,
+    max_tokens: typeof maxTokens === 'number' ? maxTokens : 4096,
+    top_p: typeof topP === 'number' ? topP : 0.95,
+    ...parsedCustomBody
   };
 
   onInputPayload({
@@ -324,6 +375,7 @@ export async function streamLlm({
     reasoningMode,
     systemPrompt,
     userPrompt: prompt,
+    parameters: { temperature, maxTokens, topP },
     timestamp: new Date().toISOString()
   });
 
