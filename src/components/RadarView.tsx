@@ -23,7 +23,7 @@ export const RadarView: React.FC<RadarViewProps> = ({ ports, onSelectPort }) => 
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Filter listening ports for clean visualization
+  // Filter and deduplicate listening ports so each port has exactly ONE radar beacon
   const filteredList = useMemo(() => {
     let list = ports.filter(p => p.state === 'LISTENING');
 
@@ -40,7 +40,27 @@ export const RadarView: React.FC<RadarViewProps> = ({ ports, onSelectPort }) => 
       );
     }
 
-    return list;
+    // Deduplicate by port + proto so multiple sockets on the same port (e.g. mDNS 5353) never render duplicate nodes
+    const portMap = new Map<string, PortInfo>();
+    for (const p of list) {
+      const key = `${p.localPort}-${p.proto}`;
+      const existing = portMap.get(key);
+      if (!existing) {
+        portMap.set(key, p);
+      } else {
+        // Merge attributes to keep highest risk, LAN exposure, and meaningful process info
+        const isLan = existing.isLanPublic || p.isLanPublic;
+        const isHigh = existing.risk === 'High' || p.risk === 'High';
+        const hasProcess = existing.processName && existing.processName !== 'Unknown';
+        portMap.set(key, {
+          ...(hasProcess ? existing : p),
+          isLanPublic: isLan,
+          risk: isHigh ? 'High' : (existing.risk === 'Medium' || p.risk === 'Medium') ? 'Medium' : 'Low'
+        });
+      }
+    }
+
+    return Array.from(portMap.values());
   }, [ports, filterMode]);
 
   // Distribute nodes 360 degrees around EACH ring separately to avoid clumping
@@ -74,6 +94,14 @@ export const RadarView: React.FC<RadarViewProps> = ({ ports, onSelectPort }) => 
     return [...systemMapped, ...registeredMapped, ...dynamicMapped];
   }, [filteredList]);
 
+  // Single authoritative active node representation on radar
+  const activeNode = useMemo(() => {
+    if (!activePort) return null;
+    return activeNodes.find(n => n.id === activePort.id) ||
+           activeNodes.find(n => n.localPort === activePort.localPort && n.proto === activePort.proto) ||
+           null;
+  }, [activeNodes, activePort]);
+
   // Keep activePort data updated if ports data refreshes
   useEffect(() => {
     if (activePort) {
@@ -84,16 +112,22 @@ export const RadarView: React.FC<RadarViewProps> = ({ ports, onSelectPort }) => 
     }
   }, [ports]);
 
-  // Determine if a node should show a persistent label
+  // Determine if a node should show a subtle background label
   const lanPortsCount = useMemo(() => activeNodes.filter(n => n.isLanPublic).length, [activeNodes]);
 
-  const shouldShowLabel = useCallback((node: any, isSelected: boolean) => {
-    if (isSelected) return true;
+  const shouldShowLabel = useCallback((node: any) => {
     if (node.localPort === 8989) return true; // Always label PortRadar
     if (node.isLanPublic && lanPortsCount <= 5) return true; // Label LAN ports if few
     if (activeNodes.length <= 15) return true; // Label all if few nodes
     return false;
   }, [lanPortsCount, activeNodes.length]);
+
+  const getNodeColor = (node: PortInfo) => {
+    if (node.localPort === 8989) return { fill: '#10b981', stroke: '#059669' };
+    if (node.risk === 'High') return { fill: '#f43f5e', stroke: '#e11d48' };
+    if (node.isLanPublic) return { fill: '#f59e0b', stroke: '#d97706' };
+    return { fill: '#38bdf8', stroke: '#0284c7' };
+  };
 
   return (
     <div 
@@ -202,12 +236,12 @@ export const RadarView: React.FC<RadarViewProps> = ({ ports, onSelectPort }) => 
           </text>
 
           {/* Connecting Laser Beam to Active Port */}
-          {activePort && (
+          {activeNode && (
             <line
               x1="250"
               y1="250"
-              x2={activeNodes.find(n => n.id === activePort.id || (n.localPort === activePort.localPort && n.proto === activePort.proto))?.x || 250}
-              y2={activeNodes.find(n => n.id === activePort.id || (n.localPort === activePort.localPort && n.proto === activePort.proto))?.y || 250}
+              x2={activeNode.x}
+              y2={activeNode.y}
               stroke="rgba(56, 189, 248, 0.8)"
               strokeWidth="2"
               strokeDasharray="3 3"
@@ -217,29 +251,11 @@ export const RadarView: React.FC<RadarViewProps> = ({ ports, onSelectPort }) => 
 
           {/* Orbit Nodes */}
           {activeNodes.map((node) => {
-            const isSelected = activePort?.id === node.id || (activePort?.localPort === node.localPort && activePort?.proto === node.proto);
+            const isSelected = activeNode?.id === node.id;
             const isLan = node.isLanPublic;
-            const isHighRisk = node.risk === 'High';
             const isAppServer = node.localPort === 8989;
-
-            let fillColor = '#38bdf8'; // Cyan default (localhost apps)
-            let strokeColor = '#0284c7';
-
-            if (isAppServer) {
-              fillColor = '#10b981'; // Emerald for PortRadar itself
-              strokeColor = '#059669';
-            } else if (isHighRisk) {
-              fillColor = '#f43f5e'; // Rose
-              strokeColor = '#e11d48';
-            } else if (isLan) {
-              fillColor = '#f59e0b'; // Amber for LAN public
-              strokeColor = '#d97706';
-            } else {
-              fillColor = '#6366f1'; // Indigo for protected localhost
-              strokeColor = '#4f46e5';
-            }
-
-            const showLabel = shouldShowLabel(node, isSelected);
+            const { fill: fillColor, stroke: strokeColor } = getNodeColor(node);
+            const showLabel = shouldShowLabel(node);
 
             return (
               <g
@@ -260,15 +276,15 @@ export const RadarView: React.FC<RadarViewProps> = ({ ports, onSelectPort }) => 
                   fill="transparent"
                 />
 
-                {/* Animated Ping Ring for active/selected node or PortRadar server */}
-                {(isSelected || isAppServer) && (
+                {/* Animated Ping Ring for PortRadar server (if not active) */}
+                {isAppServer && !isSelected && (
                   <circle
                     cx={node.x}
                     cy={node.y}
-                    r={isSelected ? "16" : "10"}
+                    r="10"
                     fill="none"
                     stroke={fillColor}
-                    strokeWidth={isSelected ? "2" : "1.5"}
+                    strokeWidth="1.5"
                     className="animate-ping opacity-60"
                   />
                 )}
@@ -285,54 +301,63 @@ export const RadarView: React.FC<RadarViewProps> = ({ ports, onSelectPort }) => 
                   className="transition-all duration-150"
                 />
 
-                {/* Clean Floating Badge Label for Active / Key Ports */}
-                {showLabel && (
-                  <g className="pointer-events-none transition-all">
-                    {isSelected ? (
-                      /* Active Highlight Pill */
-                      <g>
-                        <rect
-                          x={node.x - 32}
-                          y={node.y - 26}
-                          width="64"
-                          height="18"
-                          rx="5"
-                          fill="#090d16"
-                          stroke={fillColor}
-                          strokeWidth="1.5"
-                          filter="url(#glow)"
-                        />
-                        <text
-                          x={node.x}
-                          y={node.y - 14}
-                          fill="#ffffff"
-                          fontSize="10"
-                          fontWeight="bold"
-                          textAnchor="middle"
-                          fontFamily="monospace"
-                        >
-                          :{node.localPort}
-                        </text>
-                      </g>
-                    ) : (
-                      /* Subtle Non-overlapping Label */
-                      <text
-                        x={node.x}
-                        y={node.y - 8}
-                        fill="rgba(203, 213, 225, 0.75)"
-                        fontSize="8.5"
-                        fontFamily="monospace"
-                        textAnchor="middle"
-                        className="drop-shadow"
-                      >
-                        {node.localPort}
-                      </text>
-                    )}
-                  </g>
+                {/* Subtle non-active label for key ports */}
+                {!isSelected && showLabel && (
+                  <text
+                    x={node.x}
+                    y={node.y - 8}
+                    fill="rgba(203, 213, 225, 0.75)"
+                    fontSize="8.5"
+                    fontFamily="monospace"
+                    textAnchor="middle"
+                    className="drop-shadow pointer-events-none"
+                  >
+                    {node.localPort}
+                  </text>
                 )}
               </g>
             );
           })}
+
+          {/* Dedicated Guaranteed Single Active Node Badge & Ping Overlay */}
+          {activeNode && (
+            <g className="pointer-events-none transition-all">
+              {/* Active Pulsing Ping Ring */}
+              <circle
+                cx={activeNode.x}
+                cy={activeNode.y}
+                r="16"
+                fill="none"
+                stroke={getNodeColor(activeNode).fill}
+                strokeWidth="2"
+                className="animate-ping opacity-60"
+              />
+
+              {/* Single Active Highlight Pill */}
+              <rect
+                x={activeNode.x - 32}
+                y={activeNode.y - 26}
+                width="64"
+                height="18"
+                rx="5"
+                fill="#090d16"
+                stroke={getNodeColor(activeNode).fill}
+                strokeWidth="1.5"
+                filter="url(#glow)"
+              />
+              <text
+                x={activeNode.x}
+                y={activeNode.y - 14}
+                fill="#ffffff"
+                fontSize="10"
+                fontWeight="bold"
+                textAnchor="middle"
+                fontFamily="monospace"
+              >
+                :{activeNode.localPort}
+              </text>
+            </g>
+          )}
 
           {/* Central Core (Laptop Host) */}
           <circle cx="250" cy="250" r="24" fill="#090d16" stroke="#38bdf8" strokeWidth="2" filter="url(#glow)" />
