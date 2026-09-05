@@ -7,6 +7,7 @@ import { PortInfo } from '../types/network';
 import { AiConfig } from '../types/ai';
 import { MarkdownReport } from './MarkdownReport';
 import { ThinkingBox } from './ThinkingBox';
+import { LiveAiInspector } from './LiveAiInspector';
 
 interface CategoryAccordionProps {
   ports: PortInfo[];
@@ -24,6 +25,7 @@ export const CategoryAccordion: React.FC<CategoryAccordionProps> = ({
   const [expandedCategories, setExpandedCategories] = useState<Record<string, boolean>>({});
   const [categoryStreams, setCategoryStreams] = useState<Record<string, string>>({});
   const [categoryThinking, setCategoryThinking] = useState<Record<string, string>>({});
+  const [categoryRawOutput, setCategoryRawOutput] = useState<Record<string, string>>({});
   const [categoryInspector, setCategoryInspector] = useState<Record<string, any>>({});
   const [activeInspector, setActiveInspector] = useState<string | null>(null);
   const [loadingCategory, setLoadingCategory] = useState<string | null>(null);
@@ -56,6 +58,7 @@ export const CategoryAccordion: React.FC<CategoryAccordionProps> = ({
     setLoadingCategory(cat);
     setCategoryStreams(prev => ({ ...prev, [cat]: '' }));
     setCategoryThinking(prev => ({ ...prev, [cat]: '' }));
+    setCategoryRawOutput(prev => ({ ...prev, [cat]: '' }));
 
     try {
       const res = await fetch('/api/ai/category', {
@@ -112,6 +115,7 @@ export const CategoryAccordion: React.FC<CategoryAccordionProps> = ({
               const parsed = JSON.parse(data);
               if (parsed.text) {
                 setCategoryThinking(prev => ({ ...prev, [cat]: (prev[cat] || '') + parsed.text }));
+                setCategoryRawOutput(prev => ({ ...prev, [cat]: (prev[cat] || '') + parsed.text }));
               }
             } catch {}
           } else if (event === 'delta') {
@@ -119,6 +123,7 @@ export const CategoryAccordion: React.FC<CategoryAccordionProps> = ({
               const parsed = JSON.parse(data);
               if (parsed.text) {
                 setCategoryStreams(prev => ({ ...prev, [cat]: (prev[cat] || '') + parsed.text }));
+                setCategoryRawOutput(prev => ({ ...prev, [cat]: (prev[cat] || '') + parsed.text }));
               }
             } catch {}
           } else if (event === 'done') {
@@ -235,42 +240,54 @@ export const CategoryAccordion: React.FC<CategoryAccordionProps> = ({
               {/* Accordion Content */}
               {isExpanded && (
                 <div className="px-5 pb-5 pt-1 space-y-3 border-t border-slate-800/60">
-                  {/* Chain of Thought Box */}
-                  {thinkingText && (
-                    <ThinkingBox thinking={thinkingText} isThinking={isLoadingAi} />
-                  )}
-
                   {/* AI Educational Explanation Box */}
-                  {aiStream && (
-                    <div className="bg-slate-950/80 border border-indigo-500/30 rounded-xl p-4 text-xs sm:text-sm text-slate-200 leading-relaxed space-y-3 shadow-inner">
-                      <div className="flex items-center justify-between">
+                  {(aiStream || isLoadingAi) && (
+                    <div className="bg-slate-950/80 border border-indigo-500/30 rounded-xl p-4 text-xs sm:text-sm text-slate-200 leading-relaxed space-y-4 shadow-inner">
+                      <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 flex-wrap gap-2">
                         <div className="flex items-center gap-1.5 text-xs font-bold text-cyan-400">
                           <Sparkles className="w-4 h-4" />
                           <span>AI Educational Insights for {category}:</span>
+                          {isLoadingAi && (
+                            <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping ml-1" />
+                          )}
                         </div>
 
-                        {inspectorData && (
+                        {/* View Switcher: Formatted vs Live Inspector */}
+                        <div className="flex items-center gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800 text-xs">
                           <button
-                            onClick={() => setActiveInspector(showInspector ? null : category)}
-                            className="text-[11px] font-mono text-slate-400 hover:text-cyan-300 flex items-center gap-1 cursor-pointer"
+                            onClick={() => setActiveInspector(null)}
+                            className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+                              !showInspector ? 'bg-cyan-500/20 text-cyan-300 font-semibold' : 'text-slate-400 hover:text-slate-200'
+                            }`}
                           >
-                            <Terminal className="w-3.5 h-3.5" />
-                            <span>{showInspector ? 'Hide Raw Input' : 'Inspect Input/Prompt'}</span>
+                            Formatted Report
                           </button>
-                        )}
+                          <button
+                            onClick={() => setActiveInspector(category)}
+                            className={`px-2.5 py-1 rounded-lg transition-all flex items-center gap-1 cursor-pointer ${
+                              showInspector ? 'bg-cyan-500/20 text-cyan-300 font-semibold' : 'text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            <Terminal className="w-3 h-3 text-indigo-400" />
+                            <span>Live Inspector</span>
+                          </button>
+                        </div>
                       </div>
 
-                      {/* Deconstructed Markdown Report with streaming cursor */}
-                      <MarkdownReport content={aiStream} isStreaming={isLoadingAi} />
-
-                      {/* Inline Raw Inspector Drawer */}
-                      {showInspector && inspectorData && (
-                        <div className="mt-3 pt-3 border-t border-slate-800 space-y-2 text-[11px] font-mono text-slate-300 bg-slate-900 p-3 rounded-lg">
-                          <div className="text-slate-400 font-semibold">Raw Input Sent to AI:</div>
-                          <div className="max-h-40 overflow-y-auto whitespace-pre-wrap bg-slate-950 p-2.5 rounded border border-slate-800 text-slate-400">
-                            {inspectorData.userPrompt || JSON.stringify(inspectorData, null, 2)}
-                          </div>
+                      {/* Content view */}
+                      {!showInspector ? (
+                        <div className="space-y-3">
+                          {thinkingText && (
+                            <ThinkingBox thinking={thinkingText} isThinking={isLoadingAi} />
+                          )}
+                          <MarkdownReport content={aiStream} isStreaming={isLoadingAi} />
                         </div>
+                      ) : (
+                        <LiveAiInspector
+                          metadata={inspectorData}
+                          rawOutput={categoryRawOutput[category] || aiStream}
+                          isStreaming={isLoadingAi}
+                        />
                       )}
                     </div>
                   )}

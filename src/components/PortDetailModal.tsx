@@ -8,6 +8,7 @@ import { PortInfo } from '../types/network';
 import { AiConfig } from '../types/ai';
 import { MarkdownReport } from './MarkdownReport';
 import { ThinkingBox } from './ThinkingBox';
+import { LiveAiInspector, AiInputMetadata } from './LiveAiInspector';
 
 interface PortDetailModalProps {
   port: PortInfo | null;
@@ -32,6 +33,10 @@ export const PortDetailModal: React.FC<PortDetailModalProps> = ({
   const [aiStreaming, setAiStreaming] = useState(false);
   const [aiReport, setAiReport] = useState<string>('');
   const [aiThinking, setAiThinking] = useState<string>('');
+  const [aiMetadata, setAiMetadata] = useState<AiInputMetadata | null>(null);
+  const [rawOutputStream, setRawOutputStream] = useState<string>('');
+  const [aiViewTab, setAiViewTab] = useState<'report' | 'inspector'>('report');
+  const [reasoningMode, setReasoningMode] = useState<boolean>(aiConfig?.reasoningMode ?? false);
   const [showAiAdvisor, setShowAiAdvisor] = useState(false);
 
   if (!port) return null;
@@ -56,13 +61,18 @@ export const PortDetailModal: React.FC<PortDetailModalProps> = ({
     setAiStreaming(true);
     setAiReport('');
     setAiThinking('');
+    setRawOutputStream('');
+    setAiMetadata(null);
 
     try {
       const res = await fetch('/api/ai/explain-port', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          config: aiConfig,
+          config: {
+            ...aiConfig,
+            reasoningMode
+          },
           port
         })
       });
@@ -101,15 +111,26 @@ export const PortDetailModal: React.FC<PortDetailModalProps> = ({
             }
           }
 
-          if (event === 'reasoning') {
+          if (event === 'metadata') {
+            try {
+              const meta = JSON.parse(data);
+              setAiMetadata(meta);
+            } catch {}
+          } else if (event === 'reasoning') {
             try {
               const parsed = JSON.parse(data);
-              if (parsed.text) setAiThinking(prev => prev + parsed.text);
+              if (parsed.text) {
+                setAiThinking(prev => prev + parsed.text);
+                setRawOutputStream(prev => prev + parsed.text);
+              }
             } catch {}
           } else if (event === 'delta') {
             try {
               const parsed = JSON.parse(data);
-              if (parsed.text) setAiReport(prev => prev + parsed.text);
+              if (parsed.text) {
+                setAiReport(prev => prev + parsed.text);
+                setRawOutputStream(prev => prev + parsed.text);
+              }
             } catch {}
           } else if (event === 'done') {
             setAiStreaming(false);
@@ -224,27 +245,94 @@ export const PortDetailModal: React.FC<PortDetailModalProps> = ({
               </p>
             </div>
 
-            <button
-              onClick={handleAskAiPort}
-              disabled={aiStreaming}
-              className="px-3.5 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer flex-shrink-0 shadow-md"
-            >
-              {aiStreaming ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Sparkles className="w-3.5 h-3.5" />
-              )}
-              <span>{aiStreaming ? 'Streaming...' : 'Ask AI Advisor'}</span>
-            </button>
+            <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+              {/* Reasoning Mode Toggle */}
+              <button
+                onClick={() => setReasoningMode(!reasoningMode)}
+                className={`px-2.5 py-1.5 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                  reasoningMode
+                    ? 'bg-purple-600/20 border-purple-500/40 text-purple-200 shadow-sm shadow-purple-950/30'
+                    : 'bg-slate-800/80 border-slate-700 text-slate-400 hover:text-slate-200'
+                }`}
+                title="Toggle Chain-of-Thought deliberation scratchpad"
+              >
+                <Brain className={`w-3.5 h-3.5 ${reasoningMode ? 'text-purple-400' : 'text-slate-500'}`} />
+                <span className="hidden sm:inline">{reasoningMode ? 'CoT Reasoning ON' : 'Reasoning OFF'}</span>
+                <span className="sm:hidden">{reasoningMode ? 'CoT ON' : 'CoT OFF'}</span>
+              </button>
+
+              <button
+                onClick={handleAskAiPort}
+                disabled={aiStreaming}
+                className="px-3.5 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer flex-shrink-0 shadow-md"
+              >
+                {aiStreaming ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Sparkles className="w-3.5 h-3.5" />
+                )}
+                <span>{aiStreaming ? 'Streaming...' : 'Ask AI Advisor'}</span>
+              </button>
+            </div>
           </div>
 
           {/* AI Advisor Streaming Output Box */}
-          {showAiAdvisor && (aiReport || aiStreaming || aiThinking) && (
-            <div className="bg-slate-950 border border-cyan-500/30 rounded-xl p-4 space-y-3">
-              {aiThinking && (
-                <ThinkingBox thinking={aiThinking} isThinking={aiStreaming} />
+          {showAiAdvisor && (aiReport || aiStreaming || aiThinking || rawOutputStream) && (
+            <div className="bg-slate-950 border border-cyan-500/30 rounded-xl p-4 space-y-4 shadow-xl">
+              {/* Output Sub-Tabs */}
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3 flex-wrap gap-2">
+                <div className="flex items-center gap-1.5 bg-slate-900 p-1 rounded-xl border border-slate-800 text-xs">
+                  <button
+                    onClick={() => setAiViewTab('report')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                      aiViewTab === 'report'
+                        ? 'bg-cyan-500/20 text-cyan-300 font-semibold'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Formatted Security Advisory</span>
+                    {aiStreaming && (
+                      <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping ml-1" />
+                    )}
+                  </button>
+
+                  <button
+                    onClick={() => setAiViewTab('inspector')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                      aiViewTab === 'inspector'
+                        ? 'bg-cyan-500/20 text-cyan-300 font-semibold'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <Terminal className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>Live AI Inspector (Raw Input & Stream)</span>
+                  </button>
+                </div>
+
+                <div className="text-[11px] font-mono text-slate-500">
+                  {rawOutputStream.length} chars streamed
+                </div>
+              </div>
+
+              {/* Tab 1: Formatted Report */}
+              {aiViewTab === 'report' && (
+                <div className="space-y-3">
+                  {aiThinking && (
+                    <ThinkingBox thinking={aiThinking} isThinking={aiStreaming} />
+                  )}
+                  <MarkdownReport content={aiReport} isStreaming={aiStreaming} />
+                </div>
               )}
-              <MarkdownReport content={aiReport} isStreaming={aiStreaming} />
+
+              {/* Tab 2: Live AI Inspector */}
+              {aiViewTab === 'inspector' && (
+                <LiveAiInspector
+                  metadata={aiMetadata}
+                  rawOutput={rawOutputStream}
+                  isStreaming={aiStreaming}
+                />
+              )}
             </div>
           )}
 
