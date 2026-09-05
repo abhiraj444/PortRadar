@@ -30,6 +30,8 @@ export function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('ALL');
   const [selectedPort, setSelectedPort] = useState<PortInfo | null>(null);
+  const [visibleCount, setVisibleCount] = useState(24);
+  const [listViewMode, setListViewMode] = useState<'grid' | 'table'>('grid');
 
   // AI State
   const [aiConfig, setAiConfig] = useState<AiConfig>(() => {
@@ -43,6 +45,11 @@ export function App() {
   const [isAiSettingsOpen, setIsAiSettingsOpen] = useState(false);
   const [isAiAuditOpen, setIsAiAuditOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+
+  // Reset visibleCount when search or filter changes
+  useEffect(() => {
+    setVisibleCount(24);
+  }, [searchQuery, selectedCategory, activeFilter]);
 
   // Save AI Config
   const handleSaveAiConfig = (newConfig: AiConfig) => {
@@ -150,6 +157,11 @@ export function App() {
 
     return list;
   }, [scanData, activeFilter, selectedCategory, searchQuery]);
+
+  // Paginated/limited slice for clean, fast rendering
+  const displayedPorts = useMemo(() => {
+    return filteredPorts.slice(0, visibleCount);
+  }, [filteredPorts, visibleCount]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col selection:bg-cyan-500/30 selection:text-cyan-200 pb-20 sm:pb-8">
@@ -453,11 +465,33 @@ export function App() {
                     <option key={cat} value={cat}>{cat}</option>
                   ))}
                 </select>
+
+                {/* View Toggle (Grid / Table) */}
+                <div className="flex items-center bg-slate-900 border border-slate-800 rounded-xl p-1 text-xs">
+                  <button
+                    onClick={() => setListViewMode('grid')}
+                    className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                      listViewMode === 'grid' && activeView !== 'table' ? 'bg-cyan-500/20 text-cyan-300 font-semibold' : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                    title="Grid Cards View"
+                  >
+                    <LayoutGrid className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => setListViewMode('table')}
+                    className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                      listViewMode === 'table' || activeView === 'table' ? 'bg-cyan-500/20 text-cyan-300 font-semibold' : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                    title="Compact Table View"
+                  >
+                    <TableIcon className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
             </div>
 
             {/* Port Grid or Table View */}
-            {activeView === 'table' ? (
+            {(activeView === 'table' || listViewMode === 'table') ? (
               <div className="bg-slate-900/60 border border-slate-800 rounded-2xl overflow-x-auto shadow-xl">
                 <table className="w-full text-left border-collapse text-xs">
                   <thead>
@@ -472,7 +506,7 @@ export function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60 font-sans">
-                    {filteredPorts.map((p) => (
+                    {displayedPorts.map((p) => (
                       <tr
                         key={p.id}
                         onClick={() => setSelectedPort(p)}
@@ -526,13 +560,48 @@ export function App() {
               </div>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                {filteredPorts.map((port) => (
+                {displayedPorts.map((port) => (
                   <PortCard
                     key={port.id}
                     port={port}
                     onSelect={(p) => setSelectedPort(p)}
                   />
                 ))}
+              </div>
+            )}
+
+            {/* Pagination / Show More Controls */}
+            {filteredPorts.length > 24 && (
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-slate-900/60 border border-slate-800 rounded-2xl p-4 my-6">
+                <span className="text-xs text-slate-400 font-mono">
+                  Showing <strong className="text-cyan-400">{displayedPorts.length}</strong> of <strong className="text-slate-200">{filteredPorts.length}</strong> active ports
+                </span>
+                <div className="flex items-center gap-2">
+                  {displayedPorts.length < filteredPorts.length && (
+                    <>
+                      <button
+                        onClick={() => setVisibleCount(prev => Math.min(prev + 24, filteredPorts.length))}
+                        className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-xl transition-all cursor-pointer shadow-sm"
+                      >
+                        Show More (+24)
+                      </button>
+                      <button
+                        onClick={() => setVisibleCount(filteredPorts.length)}
+                        className="px-4 py-2 bg-cyan-600/20 hover:bg-cyan-600/30 text-cyan-300 border border-cyan-500/30 text-xs font-semibold rounded-xl transition-all cursor-pointer shadow-sm"
+                      >
+                        Show All ({filteredPorts.length})
+                      </button>
+                    </>
+                  )}
+                  {visibleCount > 24 && (
+                    <button
+                      onClick={() => setVisibleCount(24)}
+                      className="px-3.5 py-2 bg-slate-800/80 hover:bg-slate-800 text-slate-400 hover:text-slate-200 text-xs rounded-xl transition-colors cursor-pointer"
+                    >
+                      Collapse
+                    </button>
+                  )}
+                </div>
               </div>
             )}
 
