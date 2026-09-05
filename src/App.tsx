@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { 
   Radar, LayoutGrid, Table as TableIcon, RefreshCw, Search, Filter, 
   Wifi, Shield, AlertCircle, Laptop, Globe, Lock, Cpu, ArrowUpDown,
-  Sparkles, Settings, Folder, ShieldCheck
+  Sparkles, Settings, Folder, ShieldCheck, History
 } from 'lucide-react';
 import { NetworkInfo, PortInfo, ScanResponse } from './types/network';
 import { AiConfig, DEFAULT_AI_CONFIG } from './types/ai';
@@ -15,6 +15,7 @@ import { PortDetailModal } from './components/PortDetailModal';
 import { CategoryAccordion } from './components/CategoryAccordion';
 import { AiSettingsModal } from './components/AiSettingsModal';
 import { AiAuditModal } from './components/AiAuditModal';
+import { AiHistoryModal } from './components/AiHistoryModal';
 
 const STORAGE_KEY = 'portradar_ai_config';
 
@@ -41,6 +42,7 @@ export function App() {
   });
   const [isAiSettingsOpen, setIsAiSettingsOpen] = useState(false);
   const [isAiAuditOpen, setIsAiAuditOpen] = useState(false);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
 
   // Save AI Config
   const handleSaveAiConfig = (newConfig: AiConfig) => {
@@ -175,6 +177,13 @@ export function App() {
             {/* Mobile Header AI triggers */}
             <div className="flex items-center gap-1.5 sm:hidden">
               <button
+                onClick={() => setIsHistoryOpen(true)}
+                className="p-2 bg-slate-900 border border-slate-800 text-slate-300 rounded-xl"
+                title="Audit History"
+              >
+                <History className="w-4 h-4 text-indigo-400" />
+              </button>
+              <button
                 onClick={() => setIsAiAuditOpen(true)}
                 className="p-2 bg-gradient-to-r from-cyan-600/30 to-indigo-600/30 border border-cyan-500/40 text-cyan-300 rounded-xl"
                 title="AI Audit"
@@ -248,6 +257,16 @@ export function App() {
             >
               <Sparkles className="w-3.5 h-3.5" />
               <span>AI Security Audit</span>
+            </button>
+
+            {/* AI History Button */}
+            <button
+              onClick={() => setIsHistoryOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white rounded-xl text-xs font-medium transition-colors cursor-pointer"
+              title="Saved AI Security Reports & Audit History"
+            >
+              <History className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Audit History</span>
             </button>
 
             {/* AI Settings Button */}
@@ -565,6 +584,13 @@ export function App() {
           <span>AI Audit</span>
         </button>
         <button
+          onClick={() => setIsHistoryOpen(true)}
+          className="flex flex-col items-center gap-1 p-1.5 rounded-lg text-[10px] text-slate-400 hover:text-indigo-400"
+        >
+          <History className="w-4 h-4" />
+          <span>History</span>
+        </button>
+        <button
           onClick={() => setIsAiSettingsOpen(true)}
           className="flex flex-col items-center gap-1 p-1.5 rounded-lg text-[10px] text-slate-400"
         >
@@ -577,6 +603,7 @@ export function App() {
       <PortDetailModal
         port={selectedPort}
         lanIp={network?.primaryIp || '127.0.0.1'}
+        aiConfig={aiConfig}
         onClose={() => setSelectedPort(null)}
         onProcessKilled={() => fetchPorts(true)}
       />
@@ -598,6 +625,11 @@ export function App() {
         onClose={() => setIsAiSettingsOpen(false)}
         config={aiConfig}
         onSaveConfig={handleSaveAiConfig}
+      />
+
+      <AiHistoryModal
+        isOpen={isHistoryOpen}
+        onClose={() => setIsHistoryOpen(false)}
       />
 
       {/* Footer */}

@@ -1,13 +1,18 @@
 import React, { useState } from 'react';
 import { 
   X, Globe, Lock, ShieldAlert, ShieldCheck, Cpu, Terminal, 
-  ExternalLink, Copy, Check, Trash2, AlertTriangle, Info, Network
+  ExternalLink, Copy, Check, Trash2, AlertTriangle, Info, Network,
+  Sparkles, Loader2, Brain 
 } from 'lucide-react';
 import { PortInfo } from '../types/network';
+import { AiConfig } from '../types/ai';
+import { MarkdownReport } from './MarkdownReport';
+import { ThinkingBox } from './ThinkingBox';
 
 interface PortDetailModalProps {
   port: PortInfo | null;
   lanIp: string;
+  aiConfig?: AiConfig;
   onClose: () => void;
   onProcessKilled: () => void;
 }
@@ -15,12 +20,19 @@ interface PortDetailModalProps {
 export const PortDetailModal: React.FC<PortDetailModalProps> = ({ 
   port, 
   lanIp, 
+  aiConfig,
   onClose,
   onProcessKilled 
 }) => {
   const [copied, setCopied] = useState(false);
   const [killing, setKilling] = useState(false);
   const [killError, setKillError] = useState<string | null>(null);
+
+  // Single port AI advisor states
+  const [aiStreaming, setAiStreaming] = useState(false);
+  const [aiReport, setAiReport] = useState<string>('');
+  const [aiThinking, setAiThinking] = useState<string>('');
+  const [showAiAdvisor, setShowAiAdvisor] = useState(false);
 
   if (!port) return null;
 
@@ -32,6 +44,89 @@ export const PortDetailModal: React.FC<PortDetailModalProps> = ({
     navigator.clipboard.writeText(cmd);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleAskAiPort = async () => {
+    if (!aiConfig?.apiKey && aiConfig?.provider !== 'ollama') {
+      alert('Please configure your AI Provider and API key in AI Settings first.');
+      return;
+    }
+
+    setShowAiAdvisor(true);
+    setAiStreaming(true);
+    setAiReport('');
+    setAiThinking('');
+
+    try {
+      const res = await fetch('/api/ai/explain-port', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          config: aiConfig,
+          port
+        })
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || `Server error: ${res.status}`);
+      }
+
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error('Readable stream not supported');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
+
+        for (const block of lines) {
+          if (!block.trim()) continue;
+
+          let event = 'delta';
+          let data = '';
+
+          const blockLines = block.split('\n');
+          for (const line of blockLines) {
+            if (line.startsWith('event:')) {
+              event = line.replace(/^event:\s*/, '').trim();
+            } else if (line.startsWith('data:')) {
+              data = line.replace(/^data:\s*/, '').trim();
+            }
+          }
+
+          if (event === 'reasoning') {
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.text) setAiThinking(prev => prev + parsed.text);
+            } catch {}
+          } else if (event === 'delta') {
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.text) setAiReport(prev => prev + parsed.text);
+            } catch {}
+          } else if (event === 'done') {
+            setAiStreaming(false);
+          } else if (event === 'error') {
+            try {
+              const parsed = JSON.parse(data);
+              alert(parsed.error || 'Streaming error');
+            } catch {}
+            setAiStreaming(false);
+          }
+        }
+      }
+    } catch (err: any) {
+      alert(err.message || 'AI Advisor failed');
+    } finally {
+      setAiStreaming(false);
+    }
   };
 
   const handleKill = async () => {
@@ -116,6 +211,42 @@ export const PortDetailModal: React.FC<PortDetailModalProps> = ({
               </p>
             </div>
           </div>
+
+          {/* AI Port Advisor Trigger Banner */}
+          <div className="bg-gradient-to-r from-cyan-950/40 via-slate-900 to-indigo-950/40 border border-cyan-500/30 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <div>
+              <h4 className="text-xs font-bold text-cyan-300 flex items-center gap-1.5 uppercase tracking-wider">
+                <Sparkles className="w-3.5 h-3.5" />
+                AI Security Advisory for Port {port.localPort}
+              </h4>
+              <p className="text-xs text-slate-300 mt-0.5">
+                Generate tailored CVE threat analysis and Windows firewall protection commands.
+              </p>
+            </div>
+
+            <button
+              onClick={handleAskAiPort}
+              disabled={aiStreaming}
+              className="px-3.5 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer flex-shrink-0 shadow-md"
+            >
+              {aiStreaming ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="w-3.5 h-3.5" />
+              )}
+              <span>{aiStreaming ? 'Streaming...' : 'Ask AI Advisor'}</span>
+            </button>
+          </div>
+
+          {/* AI Advisor Streaming Output Box */}
+          {showAiAdvisor && (aiReport || aiStreaming || aiThinking) && (
+            <div className="bg-slate-950 border border-cyan-500/30 rounded-xl p-4 space-y-3">
+              {aiThinking && (
+                <ThinkingBox thinking={aiThinking} isThinking={aiStreaming} />
+              )}
+              <MarkdownReport content={aiReport} isStreaming={aiStreaming} />
+            </div>
+          )}
 
           {/* Explanation Section */}
           <div className="space-y-2">

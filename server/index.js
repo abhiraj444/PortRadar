@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import fs from 'fs';
 import { exec } from 'child_process';
 import os from 'os';
 import path from 'path';
@@ -10,6 +11,54 @@ import { generateMarkdownReport, streamLlm, getAuditSystemPrompt, getCategorySys
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Local disk audit storage directory
+const auditsDir = path.join(__dirname, '..', 'audits');
+if (!fs.existsSync(auditsDir)) {
+  fs.mkdirSync(auditsDir, { recursive: true });
+}
+
+function saveAuditToDisk({ type = 'full-audit', title = '', content = '', reasoning = '', metadata = {}, rawMarkdown = '' }) {
+  try {
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const dateStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+    const safeTitle = (title || type).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
+    const filename = `${dateStr}_${safeTitle}.md`;
+    const filePath = path.join(auditsDir, filename);
+
+    let fileContent = `---
+type: ${type}
+timestamp: ${now.toISOString()}
+provider: ${metadata.provider || 'N/A'}
+model: ${metadata.model || 'N/A'}
+reasoningMode: ${Boolean(metadata.reasoningMode)}
+---
+
+# ${title || 'Network Security Audit'}
+- **Date & Time:** ${now.toLocaleString()}
+- **AI Model:** ${metadata.provider || ''} (${metadata.model || ''})
+- **Reasoning Mode:** ${metadata.reasoningMode ? 'Enabled' : 'Disabled'}
+
+`;
+
+    if (reasoning) {
+      fileContent += `## 🧠 Model Deliberation (Chain-of-Thought)\n\`\`\`\n${reasoning.trim()}\n\`\`\`\n\n---\n\n`;
+    }
+
+    fileContent += `## 🛡️ Audit Report\n${content}\n\n`;
+
+    if (rawMarkdown) {
+      fileContent += `\n---\n\n## 🔌 Snapshot of Audited Ports\n${rawMarkdown}\n`;
+    }
+
+    fs.writeFileSync(filePath, fileContent, 'utf-8');
+    return { filename, filePath, timestamp: now.toISOString() };
+  } catch (err) {
+    console.error('Failed to save audit to disk:', err);
+    return null;
+  }
+}
 
 const app = express();
 const PORT = process.env.PORT || 8989;
@@ -331,6 +380,9 @@ app.post('/api/ai/audit', async (req, res) => {
 
     const userPrompt = `Here is the live Markdown port audit of my host machine:\n\n\`\`\`markdown\n${rawMarkdown}\n\`\`\`\n\nPlease evaluate this network dump according to your instructions.`;
 
+    let fullAuditText = '';
+    let fullReasoningText = '';
+
     await streamLlm({
       provider: config.provider,
       apiKey: config.apiKey,
@@ -343,14 +395,30 @@ app.post('/api/ai/audit', async (req, res) => {
         res.write(`event: metadata\ndata: ${JSON.stringify({ ...payload, rawMarkdown })}\n\n`);
       },
       onReasoning: (reasoningChunk) => {
+        fullReasoningText += reasoningChunk;
         res.write(`event: reasoning\ndata: ${JSON.stringify({ text: reasoningChunk })}\n\n`);
       },
       onChunk: (textChunk) => {
+        fullAuditText += textChunk;
         res.write(`event: delta\ndata: ${JSON.stringify({ text: textChunk })}\n\n`);
       }
     });
 
-    res.write(`event: done\ndata: {}\n\n`);
+    // Save every audit permanently to local disk in audits/
+    const savedInfo = saveAuditToDisk({
+      type: 'full-network-audit',
+      title: 'Full Network Security Audit',
+      content: fullAuditText,
+      reasoning: fullReasoningText,
+      metadata: {
+        provider: config.provider,
+        model: config.model,
+        reasoningMode
+      },
+      rawMarkdown
+    });
+
+    res.write(`event: done\ndata: ${JSON.stringify({ savedFile: savedInfo?.filename })}\n\n`);
     res.end();
   } catch (error) {
     res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`);
@@ -382,6 +450,9 @@ app.post('/api/ai/category', async (req, res) => {
 
     const prompt = `Category: "${category}"\n\nActive ports running in this category on this laptop:\n${portSummary}\n\nPlease explain what each service does in 2-3 plain-English lines, why it runs, and whether people on the local Wi-Fi can see or use it.`;
 
+    let fullCatText = '';
+    let fullCatReasoning = '';
+
     await streamLlm({
       provider: config.provider,
       apiKey: config.apiKey,
@@ -394,10 +465,104 @@ app.post('/api/ai/category', async (req, res) => {
         res.write(`event: metadata\ndata: ${JSON.stringify({ ...payload, category })}\n\n`);
       },
       onReasoning: (reasoningChunk) => {
+        fullCatReasoning += reasoningChunk;
         res.write(`event: reasoning\ndata: ${JSON.stringify({ text: reasoningChunk })}\n\n`);
       },
       onChunk: (textChunk) => {
+        fullCatText += textChunk;
         res.write(`event: delta\ndata: ${JSON.stringify({ text: textChunk })}\n\n`);
+      }
+    });
+
+    // Save category explanation to local disk
+    const savedCatInfo = saveAuditToDisk({
+      type: 'category-explainer',
+      title: `Category Explanation - ${category}`,
+      content: fullCatText,
+      reasoning: fullCatReasoning,
+      metadata: {
+        provider: config.provider,
+        model: config.model,
+        reasoningMode
+      },
+      rawMarkdown: portSummary
+    });
+
+    res.write(`event: done\ndata: ${JSON.stringify({ savedFile: savedCatInfo?.filename })}\n\n`);
+    res.end();
+  } catch (error) {
+    res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`);
+    res.end();
+  }
+});
+
+// Single-Port Deep Dive AI Advisor (Real-Time SSE Streaming)
+app.post('/api/ai/explain-port', async (req, res) => {
+  const { config, port } = req.body || {};
+  if (!config || !port) {
+    return res.status(400).json({ error: 'Configuration and port object are required.' });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  try {
+    const reasoningMode = Boolean(config.reasoningMode);
+    const systemPrompt = `You are a Senior Network Security Analyst and Systems Administrator.
+Analyze a specific active port running on this Windows laptop.
+Provide an educational, deeply informative breakdown in clean Markdown covering:
+1. **Service Identity & Purpose**: What program runs here, who built it, and why it's active.
+2. **Local Network Exposure Risk**: If bound to ${port.localAddress}, what someone on the local Wi-Fi could discover, probe, or exploit.
+3. **Known Vulnerabilities / CVE History**: Common security issues associated with this port/protocol (e.g. SMB vulnerabilities, unauthenticated Redis/Mongo, cleartext FTP, RDP brute force).
+4. **Step-by-step Protection Commands**: Windows PowerShell or Netsh commands to block or bind it to localhost if needed.`;
+
+    const prompt = `Detailed Port Information:
+- Port Number: ${port.localPort} (${port.proto})
+- Local Address: ${port.localAddress} (${port.isLanPublic ? 'OPEN TO LOCAL WI-FI' : 'LOCALHOST ONLY'})
+- Process Name: ${port.processName} (PID: ${port.pid})
+- Title: ${port.title}
+- Category: ${port.category}
+- Risk Level: ${port.risk}
+- Local Description: ${port.description}
+- Details: ${port.details || 'None provided'}`;
+
+    let fullPortText = '';
+    let fullPortReasoning = '';
+
+    await streamLlm({
+      provider: config.provider,
+      apiKey: config.apiKey,
+      model: config.model,
+      baseUrl: config.baseUrl,
+      systemPrompt,
+      prompt,
+      reasoningMode,
+      onInputPayload: (payload) => {
+        res.write(`event: metadata\ndata: ${JSON.stringify({ ...payload, port: port.localPort })}\n\n`);
+      },
+      onReasoning: (chunk) => {
+        fullPortReasoning += chunk;
+        res.write(`event: reasoning\ndata: ${JSON.stringify({ text: chunk })}\n\n`);
+      },
+      onChunk: (chunk) => {
+        fullPortText += chunk;
+        res.write(`event: delta\ndata: ${JSON.stringify({ text: chunk })}\n\n`);
+      }
+    });
+
+    // Save to disk
+    saveAuditToDisk({
+      type: 'single-port-advisor',
+      title: `Port ${port.localPort} Security Advisory (${port.processName})`,
+      content: fullPortText,
+      reasoning: fullPortReasoning,
+      metadata: {
+        provider: config.provider,
+        model: config.model,
+        reasoningMode
       }
     });
 
@@ -406,6 +571,102 @@ app.post('/api/ai/category', async (req, res) => {
   } catch (error) {
     res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`);
     res.end();
+  }
+});
+
+// GET /api/ai/history - List all saved audits stored locally on laptop disk
+app.get('/api/ai/history', (_req, res) => {
+  try {
+    if (!fs.existsSync(auditsDir)) {
+      return res.json({ history: [] });
+    }
+
+    const files = fs.readdirSync(auditsDir).filter(f => f.endsWith('.md'));
+    const history = [];
+
+    for (const file of files) {
+      const filePath = path.join(auditsDir, file);
+      const stat = fs.statSync(filePath);
+      const raw = fs.readFileSync(filePath, 'utf-8');
+
+      let title = file.replace(/\.md$/, '').replace(/^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_/, '').replace(/_/g, ' ');
+      let type = 'audit';
+      let provider = '';
+      let model = '';
+
+      // Parse YAML frontmatter
+      const fmMatch = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+      if (fmMatch) {
+        const lines = fmMatch[1].split('\n');
+        for (const line of lines) {
+          const [k, ...v] = line.split(':');
+          const key = k?.trim();
+          const val = v.join(':')?.trim();
+          if (key === 'type') type = val;
+          if (key === 'provider') provider = val;
+          if (key === 'model') model = val;
+        }
+      }
+
+      // Extract title header if present
+      const titleMatch = raw.match(/# (.*)/);
+      if (titleMatch) title = titleMatch[1];
+
+      // Extract brief preview text (skip headers)
+      const contentWithoutHeader = raw.replace(/^---[\s\S]*?---/, '').replace(/#+ .*/g, '').trim();
+      const preview = contentWithoutHeader.slice(0, 180).replace(/\s+/g, ' ') + '...';
+
+      history.push({
+        id: file,
+        filename: file,
+        title,
+        type,
+        provider,
+        model,
+        createdAt: stat.mtime.toISOString(),
+        sizeKb: (stat.size / 1024).toFixed(1),
+        preview
+      });
+    }
+
+    // Sort newest first
+    history.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    res.json({ history, auditsDirectory: auditsDir });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/ai/history/:filename - Fetch specific saved audit markdown
+app.get('/api/ai/history/:filename', (req, res) => {
+  try {
+    const filename = path.basename(req.params.filename);
+    const filePath = path.join(auditsDir, filename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Audit file not found' });
+    }
+
+    const content = fs.readFileSync(filePath, 'utf-8');
+    res.json({ filename, content });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /api/ai/history/:filename - Delete a saved audit file
+app.delete('/api/ai/history/:filename', (req, res) => {
+  try {
+    const filename = path.basename(req.params.filename);
+    const filePath = path.join(auditsDir, filename);
+
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+    res.json({ success: true, message: `Deleted ${filename}` });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
