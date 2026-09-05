@@ -598,6 +598,26 @@ export function explainPort(port, processName = '', localAddress = '') {
     lanExplanation = `🔒 LOCALHOST ONLY: Bound to ${localAddress}. Only applications running directly on this laptop can communicate with this port.`;
   }
 
+  // Friendly everyday analogy for users without deep technical background
+  let friendlyAnalogy = '';
+  if ([80, 8080, 5000, 3000, 5173, 9000, 9090].includes(portNum)) {
+    friendlyAnalogy = 'Like a store front door or website welcome counter where web pages are served to visitors.';
+  } else if (portNum === 443 || portNum === 8443) {
+    friendlyAnalogy = 'Like a secure bank drive-through window with bulletproof encrypted glass for private, secure web traffic.';
+  } else if (portNum === 53) {
+    friendlyAnalogy = 'Like your phone’s address book—it converts human website names (google.com) into computer phone numbers (IP addresses).';
+  } else if (portNum === 5353) {
+    friendlyAnalogy = 'Like calling out in a living room: "Who has a printer or smart TV?" so nearby devices can discover each other automatically.';
+  } else if (portNum === 135 || portNum === 445) {
+    friendlyAnalogy = 'Like an internal intercom system inside Windows that apps and file shares use to talk behind the scenes.';
+  } else if (portNum === 8989) {
+    friendlyAnalogy = 'This is PortRadar itself! It acts like a lighthouse radar broadcasting this visual dashboard to your browser and local Wi-Fi.';
+  } else if (isDynamicRpc || isDynamicRange) {
+    friendlyAnalogy = 'Like a temporary numbered ticket at a service counter that Windows opened for a quick background task, and will tear up when done.';
+  } else {
+    friendlyAnalogy = `A dedicated communication channel for ${processName || 'this program'}, allowing it to send or receive information over your network.`;
+  }
+
   return {
     port: portNum,
     title,
@@ -609,6 +629,7 @@ export function explainPort(port, processName = '', localAddress = '') {
     isLanPublic,
     lanExplanation,
     processTitle: knownProc.title || processName,
+    friendlyAnalogy,
     recommendation: isLanPublic && (risk === 'High' || !knownPort?.safe)
       ? 'Ensure your laptop is connected to a Private network with Windows Firewall active, or configure this application to bind only to 127.0.0.1.'
       : 'Standard active port. Operating normally.'

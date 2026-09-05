@@ -498,7 +498,7 @@ app.post('/api/ai/category', async (req, res) => {
 
 // Single-Port Deep Dive AI Advisor (Real-Time SSE Streaming)
 app.post('/api/ai/explain-port', async (req, res) => {
-  const { config, port } = req.body || {};
+  const { config, port, mode = 'friendly' } = req.body || {};
   if (!config || !port) {
     return res.status(400).json({ error: 'Configuration and port object are required.' });
   }
@@ -511,7 +511,53 @@ app.post('/api/ai/explain-port', async (req, res) => {
 
   try {
     const reasoningMode = Boolean(config.reasoningMode);
-    const systemPrompt = `You are a Senior Network Security Analyst and Systems Administrator.
+    const isFriendly = mode === 'friendly';
+
+    let systemPrompt = '';
+    let prompt = '';
+
+    if (isFriendly) {
+      systemPrompt = `You are a friendly, patient, and encouraging computer networking teacher.
+Your audience has basic networking familiarity (they understand Wi-Fi, routers, IP addresses, and browsers), but DOES NOT have advanced computer science degrees, programming backgrounds, or cybersecurity expertise.
+Your goal is to explain this specific active port and program in a warm, welcoming, and intuitive everyday manner.
+
+Tone & Style Guidelines:
+- Speak like a friendly tech enthusiast explaining things over a cup of coffee.
+- Avoid scary alarms, heavy CVE acronyms, or intimidating terminal scripts.
+- Use intuitive, real-world analogies (e.g. apartment mailboxes, doors in a building, restaurant service windows, or living room speakers).
+- Focus on practical understanding: What does this program actually do? Who can reach it? Is it safe or normal?
+
+Please format your response in clean, aesthetic Markdown with these exact sections:
+
+### ☕ What is this in Plain English? (Everyday Analogy)
+- Start with a clear real-world analogy explaining what port ${port.localPort} does.
+- Describe in simple words what \`${port.processName}\` (${port.title}) is doing on this laptop right now.
+
+### 🏠 Who Can See It on My Wi-Fi?
+- Explain whether this port is private to just this laptop (${port.isLanPublic ? '⚠️ Notice: It is currently open to other devices on the same Wi-Fi' : '🔒 It is private and only accessible to software running directly on this laptop'}).
+- Explain in simple terms what someone else on the same Wi-Fi could actually do or see.
+
+### 🛡️ Is It Safe or Should I Be Worried?
+- A direct, comforting, and honest verdict: is this standard Windows software, a web tool, or something unusual?
+- Plain-English safety check: "You're safe!", "Normal background activity", or "Worth closing if you don't use it".
+
+### 💡 Simple Takeaway & Tips
+- 1-2 practical, easy tips written in normal human language.`;
+
+      if (reasoningMode) {
+        systemPrompt += `\n\nInside <thinking>...</thinking>, deliberate briefly on how to explain this port using everyday concepts before providing the final friendly report.`;
+      }
+
+      prompt = `Please explain Port ${port.localPort} in a friendly, plain-English way:
+- Port Number: ${port.localPort} (${port.proto})
+- Program Running: ${port.processName} (PID: ${port.pid})
+- Service Title: ${port.title}
+- Category: ${port.category}
+- Exposure: ${port.isLanPublic ? 'Open on Local Wi-Fi (0.0.0.0)' : 'Localhost Only (127.0.0.1)'}
+- Quick Description: ${port.description}
+${port.details ? `- Additional Details: ${port.details}` : ''}`;
+    } else {
+      systemPrompt = `You are a Senior Network Security Analyst and Systems Administrator.
 Analyze a specific active port running on this Windows laptop.
 Provide an educational, deeply informative breakdown in clean Markdown covering:
 1. **Service Identity & Purpose**: What program runs here, who built it, and why it's active.
@@ -519,7 +565,11 @@ Provide an educational, deeply informative breakdown in clean Markdown covering:
 3. **Known Vulnerabilities / CVE History**: Common security issues associated with this port/protocol (e.g. SMB vulnerabilities, unauthenticated Redis/Mongo, cleartext FTP, RDP brute force).
 4. **Step-by-step Protection Commands**: Windows PowerShell or Netsh commands to block or bind it to localhost if needed.`;
 
-    const prompt = `Detailed Port Information:
+      if (reasoningMode) {
+        systemPrompt += `\n\nInside <thinking>...</thinking>, deliberate step-by-step through threat vectors and CVE risks before providing the report.`;
+      }
+
+      prompt = `Detailed Port Information:
 - Port Number: ${port.localPort} (${port.proto})
 - Local Address: ${port.localAddress} (${port.isLanPublic ? 'OPEN TO LOCAL WI-FI' : 'LOCALHOST ONLY'})
 - Process Name: ${port.processName} (PID: ${port.pid})
@@ -528,6 +578,7 @@ Provide an educational, deeply informative breakdown in clean Markdown covering:
 - Risk Level: ${port.risk}
 - Local Description: ${port.description}
 - Details: ${port.details || 'None provided'}`;
+    }
 
     let fullPortText = '';
     let fullPortReasoning = '';
@@ -541,7 +592,7 @@ Provide an educational, deeply informative breakdown in clean Markdown covering:
       prompt,
       reasoningMode,
       onInputPayload: (payload) => {
-        res.write(`event: metadata\ndata: ${JSON.stringify({ ...payload, port: port.localPort })}\n\n`);
+        res.write(`event: metadata\ndata: ${JSON.stringify({ ...payload, port: port.localPort, mode })}\n\n`);
       },
       onReasoning: (chunk) => {
         fullPortReasoning += chunk;
@@ -555,14 +606,17 @@ Provide an educational, deeply informative breakdown in clean Markdown covering:
 
     // Save to disk
     saveAuditToDisk({
-      type: 'single-port-advisor',
-      title: `Port ${port.localPort} Security Advisory (${port.processName})`,
+      type: isFriendly ? 'friendly-port-explanation' : 'single-port-advisor',
+      title: isFriendly
+        ? `Port ${port.localPort} Friendly Explanation (${port.processName})`
+        : `Port ${port.localPort} Security Advisory (${port.processName})`,
       content: fullPortText,
       reasoning: fullPortReasoning,
       metadata: {
         provider: config.provider,
         model: config.model,
-        reasoningMode
+        reasoningMode,
+        mode
       }
     });
 

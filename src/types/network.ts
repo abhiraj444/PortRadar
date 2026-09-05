@@ -19,6 +19,7 @@ export interface PortInfo {
   lanExplanation: string;
   processTitle: string;
   recommendation: string;
+  friendlyAnalogy?: string;
 }
 
 export interface NetworkInterface {

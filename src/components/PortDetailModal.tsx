@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { 
   X, Globe, Lock, ShieldAlert, ShieldCheck, Cpu, Terminal, 
   ExternalLink, Copy, Check, Trash2, AlertTriangle, Info, Network,
-  Sparkles, Loader2, Brain 
+  Sparkles, Loader2, Brain, Coffee 
 } from 'lucide-react';
 import { PortInfo } from '../types/network';
 import { AiConfig } from '../types/ai';
@@ -30,6 +30,7 @@ export const PortDetailModal: React.FC<PortDetailModalProps> = ({
   const [killError, setKillError] = useState<string | null>(null);
 
   // Single port AI advisor states
+  const [explanationMode, setExplanationMode] = useState<'friendly' | 'technical'>('friendly');
   const [aiStreaming, setAiStreaming] = useState(false);
   const [aiReport, setAiReport] = useState<string>('');
   const [aiThinking, setAiThinking] = useState<string>('');
@@ -51,12 +52,13 @@ export const PortDetailModal: React.FC<PortDetailModalProps> = ({
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const handleAskAiPort = async () => {
+  const handleAskAiPort = async (mode: 'friendly' | 'technical' = 'friendly') => {
     if (!aiConfig?.apiKey && aiConfig?.provider !== 'ollama') {
       alert('Please configure your AI Provider and API key in AI Settings first.');
       return;
     }
 
+    setExplanationMode(mode);
     setShowAiAdvisor(true);
     setAiStreaming(true);
     setAiReport('');
@@ -73,7 +75,8 @@ export const PortDetailModal: React.FC<PortDetailModalProps> = ({
             ...aiConfig,
             reasoningMode
           },
-          port
+          port,
+          mode
         })
       });
 
@@ -234,14 +237,14 @@ export const PortDetailModal: React.FC<PortDetailModalProps> = ({
           </div>
 
           {/* AI Port Advisor Trigger Banner */}
-          <div className="bg-gradient-to-r from-cyan-950/40 via-slate-900 to-indigo-950/40 border border-cyan-500/30 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          <div className="bg-gradient-to-r from-amber-950/20 via-slate-900 to-indigo-950/30 border border-slate-700/80 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
             <div>
-              <h4 className="text-xs font-bold text-cyan-300 flex items-center gap-1.5 uppercase tracking-wider">
-                <Sparkles className="w-3.5 h-3.5" />
-                AI Security Advisory for Port {port.localPort}
+              <h4 className="text-xs font-bold text-slate-200 flex items-center gap-1.5 uppercase tracking-wider">
+                <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                AI Port Explainer & Advisory
               </h4>
-              <p className="text-xs text-slate-300 mt-0.5">
-                Generate tailored CVE threat analysis and Windows firewall protection commands.
+              <p className="text-xs text-slate-400 mt-0.5">
+                Choose a friendly plain-English breakdown with analogies or deep technical CVE security rules.
               </p>
             </div>
 
@@ -257,21 +260,38 @@ export const PortDetailModal: React.FC<PortDetailModalProps> = ({
                 title="Toggle Chain-of-Thought deliberation scratchpad"
               >
                 <Brain className={`w-3.5 h-3.5 ${reasoningMode ? 'text-purple-400' : 'text-slate-500'}`} />
-                <span className="hidden sm:inline">{reasoningMode ? 'CoT Reasoning ON' : 'Reasoning OFF'}</span>
+                <span className="hidden sm:inline">{reasoningMode ? 'CoT ON' : 'Reasoning OFF'}</span>
                 <span className="sm:hidden">{reasoningMode ? 'CoT ON' : 'CoT OFF'}</span>
               </button>
 
+              {/* Friendly Plain-English Explanation Button */}
               <button
-                onClick={handleAskAiPort}
+                onClick={() => handleAskAiPort('friendly')}
                 disabled={aiStreaming}
-                className="px-3.5 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer flex-shrink-0 shadow-md"
+                className="px-3.5 py-1.5 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer flex-shrink-0 shadow-md shadow-amber-950/30 hover:scale-[1.02] active:scale-[0.98]"
+                title="Friendly plain-English explanation for users with basic networking knowledge"
               >
-                {aiStreaming ? (
+                {aiStreaming && explanationMode === 'friendly' ? (
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 ) : (
-                  <Sparkles className="w-3.5 h-3.5" />
+                  <Coffee className="w-3.5 h-3.5" />
                 )}
-                <span>{aiStreaming ? 'Streaming...' : 'Ask AI Advisor'}</span>
+                <span>{aiStreaming && explanationMode === 'friendly' ? 'Streaming...' : 'Friendly Words'}</span>
+              </button>
+
+              {/* Technical Security Advisory Button */}
+              <button
+                onClick={() => handleAskAiPort('technical')}
+                disabled={aiStreaming}
+                className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 hover:border-cyan-500/40 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer flex-shrink-0"
+                title="Deep technical CVE analysis and PowerShell firewall rules"
+              >
+                {aiStreaming && explanationMode === 'technical' ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <ShieldAlert className="w-3.5 h-3.5 text-cyan-400" />
+                )}
+                <span>{aiStreaming && explanationMode === 'technical' ? 'Streaming...' : 'Technical Advisory'}</span>
               </button>
             </div>
           </div>
@@ -286,14 +306,28 @@ export const PortDetailModal: React.FC<PortDetailModalProps> = ({
                     onClick={() => setAiViewTab('report')}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
                       aiViewTab === 'report'
-                        ? 'bg-cyan-500/20 text-cyan-300 font-semibold'
+                        ? explanationMode === 'friendly'
+                          ? 'bg-amber-500/20 text-amber-300 font-semibold'
+                          : 'bg-cyan-500/20 text-cyan-300 font-semibold'
                         : 'text-slate-400 hover:text-slate-200'
                     }`}
                   >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    <span>Formatted Security Advisory</span>
+                    {explanationMode === 'friendly' ? (
+                      <Coffee className="w-3.5 h-3.5 text-amber-400" />
+                    ) : (
+                      <ShieldAlert className="w-3.5 h-3.5 text-cyan-400" />
+                    )}
+                    <span>
+                      {explanationMode === 'friendly'
+                        ? 'Friendly Plain-English Explanation'
+                        : 'Formatted Security Advisory'}
+                    </span>
                     {aiStreaming && (
-                      <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping ml-1" />
+                      <span
+                        className={`w-2 h-2 rounded-full ${
+                          explanationMode === 'friendly' ? 'bg-amber-400' : 'bg-cyan-400'
+                        } animate-ping ml-1`}
+                      />
                     )}
                   </button>
 
@@ -336,13 +370,38 @@ export const PortDetailModal: React.FC<PortDetailModalProps> = ({
             </div>
           )}
 
-          {/* Explanation Section */}
+          {/* Explanation Section with Friendly Button */}
           <div className="space-y-2">
-            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-              <Info className="w-3.5 h-3.5 text-cyan-400" />
-              What this server means
-            </h4>
-            <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-4 text-sm text-slate-200 space-y-2.5 leading-relaxed">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                <Info className="w-3.5 h-3.5 text-cyan-400" />
+                What this server means
+              </h4>
+
+              {/* Friendly Explanation Button beside the explanation */}
+              <button
+                onClick={() => handleAskAiPort('friendly')}
+                disabled={aiStreaming}
+                className="px-3 py-1.5 bg-gradient-to-r from-amber-500/20 to-orange-500/20 hover:from-amber-500/30 hover:to-orange-500/30 text-amber-300 border border-amber-500/40 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-sm hover:scale-[1.02] active:scale-[0.98]"
+                title="Explain in friendly, plain English for someone who knows basic networking"
+              >
+                <Coffee className="w-3.5 h-3.5 text-amber-400" />
+                <span>Explain in Friendly Words</span>
+              </button>
+            </div>
+
+            <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-4 text-sm text-slate-200 space-y-3 leading-relaxed">
+              {/* Quick Everyday Analogy Callout if available */}
+              {port.friendlyAnalogy && (
+                <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-200 text-xs flex items-start gap-2.5">
+                  <span className="text-lg flex-shrink-0 mt-0.5">💡</span>
+                  <div className="space-y-0.5">
+                    <span className="font-bold text-amber-300 text-xs block">Everyday Analogy:</span>
+                    <span className="leading-relaxed opacity-95 text-xs text-amber-100/90">{port.friendlyAnalogy}</span>
+                  </div>
+                </div>
+              )}
+
               <p>{port.description}</p>
               {port.details && (
                 <p className="text-xs text-slate-400 pt-2 border-t border-slate-800/60">
