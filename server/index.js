@@ -6,7 +6,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import QRCode from 'qrcode';
 import { explainPort, PORT_DATABASE, PROCESS_DATABASE } from './portDatabase.js';
-import { generateMarkdownReport, callLlm, AUDIT_SYSTEM_PROMPT, CATEGORY_SYSTEM_PROMPT } from './ai.js';
+import { generateMarkdownReport, streamLlm, getAuditSystemPrompt, getCategorySystemPrompt } from './ai.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -308,47 +308,73 @@ app.get('/api/export/markdown', async (_req, res) => {
   }
 });
 
-// AI Network Security Audit (All-in-one analysis)
+// AI Network Security Audit (Real-Time SSE Streaming)
 app.post('/api/ai/audit', async (req, res) => {
-  try {
-    const { config } = req.body || {};
-    if (!config) {
-      return res.status(400).json({ error: 'AI configuration is required.' });
-    }
+  const { config } = req.body || {};
+  if (!config) {
+    return res.status(400).json({ error: 'AI configuration is required.' });
+  }
 
+  // Set SSE streaming headers
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  try {
     const data = await scanPorts();
     const networkInfo = await getNetworkInterfaces();
     const rawMarkdown = generateMarkdownReport(data.ports, networkInfo);
+    const reasoningMode = Boolean(config.reasoningMode);
+    const systemPrompt = getAuditSystemPrompt(reasoningMode);
 
     const userPrompt = `Here is the live Markdown port audit of my host machine:\n\n\`\`\`markdown\n${rawMarkdown}\n\`\`\`\n\nPlease evaluate this network dump according to your instructions.`;
 
-    const auditMarkdown = await callLlm({
+    await streamLlm({
       provider: config.provider,
       apiKey: config.apiKey,
       model: config.model,
       baseUrl: config.baseUrl,
-      systemPrompt: AUDIT_SYSTEM_PROMPT,
-      prompt: userPrompt
+      systemPrompt,
+      prompt: userPrompt,
+      reasoningMode,
+      onInputPayload: (payload) => {
+        res.write(`event: metadata\ndata: ${JSON.stringify({ ...payload, rawMarkdown })}\n\n`);
+      },
+      onReasoning: (reasoningChunk) => {
+        res.write(`event: reasoning\ndata: ${JSON.stringify({ text: reasoningChunk })}\n\n`);
+      },
+      onChunk: (textChunk) => {
+        res.write(`event: delta\ndata: ${JSON.stringify({ text: textChunk })}\n\n`);
+      }
     });
 
-    res.json({
-      success: true,
-      auditMarkdown,
-      rawMarkdown,
-      timestamp: new Date().toISOString()
-    });
+    res.write(`event: done\ndata: {}\n\n`);
+    res.end();
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`);
+    res.end();
   }
 });
 
-// AI Category Drill-down explanation
+// AI Category Drill-down explanation (Real-Time SSE Streaming)
 app.post('/api/ai/category', async (req, res) => {
+  const { config, category, ports } = req.body || {};
+  if (!config || !category || !ports) {
+    return res.status(400).json({ error: 'Configuration, category, and ports list are required.' });
+  }
+
+  // Set SSE streaming headers
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
   try {
-    const { config, category, ports } = req.body || {};
-    if (!config || !category || !ports) {
-      return res.status(400).json({ error: 'Configuration, category, and ports list are required.' });
-    }
+    const reasoningMode = Boolean(config.reasoningMode);
+    const systemPrompt = getCategorySystemPrompt(reasoningMode);
 
     const portSummary = ports.map(p => 
       `- Port ${p.localPort} (${p.proto}): Process \`${p.processName}\` (PID: ${p.pid}), Local Address: \`${p.localAddress}\`, Status: ${p.isLanPublic ? 'LAN Exposed' : 'Localhost Only'}, Title: "${p.title}", Description: "${p.description}"`
@@ -356,22 +382,30 @@ app.post('/api/ai/category', async (req, res) => {
 
     const prompt = `Category: "${category}"\n\nActive ports running in this category on this laptop:\n${portSummary}\n\nPlease explain what each service does in 2-3 plain-English lines, why it runs, and whether people on the local Wi-Fi can see or use it.`;
 
-    const explanation = await callLlm({
+    await streamLlm({
       provider: config.provider,
       apiKey: config.apiKey,
       model: config.model,
       baseUrl: config.baseUrl,
-      systemPrompt: CATEGORY_SYSTEM_PROMPT,
-      prompt
+      systemPrompt,
+      prompt,
+      reasoningMode,
+      onInputPayload: (payload) => {
+        res.write(`event: metadata\ndata: ${JSON.stringify({ ...payload, category })}\n\n`);
+      },
+      onReasoning: (reasoningChunk) => {
+        res.write(`event: reasoning\ndata: ${JSON.stringify({ text: reasoningChunk })}\n\n`);
+      },
+      onChunk: (textChunk) => {
+        res.write(`event: delta\ndata: ${JSON.stringify({ text: textChunk })}\n\n`);
+      }
     });
 
-    res.json({
-      success: true,
-      category,
-      explanation
-    });
+    res.write(`event: done\ndata: {}\n\n`);
+    res.end();
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`);
+    res.end();
   }
 });
 
@@ -383,18 +417,23 @@ app.post('/api/ai/test', async (req, res) => {
       return res.status(400).json({ error: 'Configuration required.' });
     }
 
-    const result = await callLlm({
+    let testOutput = '';
+    await streamLlm({
       provider: config.provider,
       apiKey: config.apiKey,
       model: config.model,
       baseUrl: config.baseUrl,
-      systemPrompt: 'You are a test connection assistant. Answer in under 5 words.',
-      prompt: 'Verify connection. Say "Connection established successfully!"'
+      systemPrompt: 'You are a connection test agent. Answer in 3 words.',
+      prompt: 'Verify connection. Say "Connection established successfully!"',
+      reasoningMode: false,
+      onChunk: (chunk) => {
+        testOutput += chunk;
+      }
     });
 
     res.json({
       success: true,
-      message: result
+      message: testOutput || 'Connection established successfully!'
     });
   } catch (error) {
     res.status(500).json({ error: error.message });

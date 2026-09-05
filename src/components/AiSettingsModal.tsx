@@ -205,6 +205,29 @@ export const AiSettingsModal: React.FC<AiSettingsModalProps> = ({
             </div>
           )}
 
+          {/* Reasoning Mode / Chain-of-Thought Toggle */}
+          <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 flex items-center justify-between gap-3">
+            <div>
+              <span className="text-xs font-semibold text-slate-200 block">
+                Chain-of-Thought Reasoning Mode
+              </span>
+              <span className="text-[11px] text-slate-400 block mt-0.5">
+                Enable step-by-step analytical deliberation inside a dedicated thinking box before producing the final report.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setForm(prev => ({ ...prev, reasoningMode: !prev.reasoningMode }))}
+              className={`w-11 h-6 flex items-center rounded-full p-1 transition-colors cursor-pointer flex-shrink-0 ${
+                form.reasoningMode ? 'bg-purple-600' : 'bg-slate-800'
+              }`}
+            >
+              <div className={`bg-white w-4 h-4 rounded-full shadow-md transform transition-transform ${
+                form.reasoningMode ? 'translate-x-5' : 'translate-x-0'
+              }`} />
+            </button>
+          </div>
+
           {/* Privacy Note */}
           <div className="bg-slate-950/60 border border-slate-800 p-3 rounded-xl text-[11px] text-slate-400 flex items-start gap-2">
             <ShieldCheck className="w-4 h-4 text-cyan-400 flex-shrink-0 mt-0.5" />

@@ -1,10 +1,12 @@
 import React, { useState, useMemo } from 'react';
 import { 
   Folder, ChevronDown, ChevronUp, Sparkles, Globe, Lock, ShieldAlert, 
-  Loader2, Info, ArrowUpRight, Cpu 
+  Loader2, Info, ArrowUpRight, Cpu, Terminal, CheckCircle2 
 } from 'lucide-react';
 import { PortInfo } from '../types/network';
 import { AiConfig } from '../types/ai';
+import { MarkdownReport } from './MarkdownReport';
+import { ThinkingBox } from './ThinkingBox';
 
 interface CategoryAccordionProps {
   ports: PortInfo[];
@@ -20,7 +22,10 @@ export const CategoryAccordion: React.FC<CategoryAccordionProps> = ({
   onOpenAiSettings
 }) => {
   const [expandedCategories, setExpandedCategories] = useState<Record<string, boolean>>({});
-  const [aiExplanations, setAiExplanations] = useState<Record<string, string>>({});
+  const [categoryStreams, setCategoryStreams] = useState<Record<string, string>>({});
+  const [categoryThinking, setCategoryThinking] = useState<Record<string, string>>({});
+  const [categoryInspector, setCategoryInspector] = useState<Record<string, any>>({});
+  const [activeInspector, setActiveInspector] = useState<string | null>(null);
   const [loadingCategory, setLoadingCategory] = useState<string | null>(null);
 
   // Group listening ports by category
@@ -34,7 +39,6 @@ export const CategoryAccordion: React.FC<CategoryAccordionProps> = ({
       map[cat].push(p);
     }
 
-    // Sort categories alphabetically, with high-risk or common dev first
     return Object.entries(map).sort(([a], [b]) => a.localeCompare(b));
   }, [ports]);
 
@@ -50,6 +54,9 @@ export const CategoryAccordion: React.FC<CategoryAccordionProps> = ({
     }
 
     setLoadingCategory(cat);
+    setCategoryStreams(prev => ({ ...prev, [cat]: '' }));
+    setCategoryThinking(prev => ({ ...prev, [cat]: '' }));
+
     try {
       const res = await fetch('/api/ai/category', {
         method: 'POST',
@@ -60,9 +67,71 @@ export const CategoryAccordion: React.FC<CategoryAccordionProps> = ({
           ports: catPorts
         })
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to get AI explanation');
-      setAiExplanations(prev => ({ ...prev, [cat]: data.explanation }));
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || `Server error: ${res.status}`);
+      }
+
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error('Readable stream not supported');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
+
+        for (const block of lines) {
+          if (!block.trim()) continue;
+
+          let event = 'delta';
+          let data = '';
+
+          const blockLines = block.split('\n');
+          for (const line of blockLines) {
+            if (line.startsWith('event:')) {
+              event = line.replace(/^event:\s*/, '').trim();
+            } else if (line.startsWith('data:')) {
+              data = line.replace(/^data:\s*/, '').trim();
+            }
+          }
+
+          if (event === 'metadata') {
+            try {
+              const meta = JSON.parse(data);
+              setCategoryInspector(prev => ({ ...prev, [cat]: meta }));
+            } catch {}
+          } else if (event === 'reasoning') {
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.text) {
+                setCategoryThinking(prev => ({ ...prev, [cat]: (prev[cat] || '') + parsed.text }));
+              }
+            } catch {}
+          } else if (event === 'delta') {
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.text) {
+                setCategoryStreams(prev => ({ ...prev, [cat]: (prev[cat] || '') + parsed.text }));
+              }
+            } catch {}
+          } else if (event === 'done') {
+            setLoadingCategory(null);
+          } else if (event === 'error') {
+            try {
+              const parsed = JSON.parse(data);
+              alert(parsed.error || 'Category explanation error');
+            } catch {}
+            setLoadingCategory(null);
+          }
+        }
+      }
     } catch (err: any) {
       alert(err.message || 'AI explanation failed');
     } finally {
@@ -79,18 +148,21 @@ export const CategoryAccordion: React.FC<CategoryAccordionProps> = ({
             AI Categorized Port Explorer
           </h3>
           <p className="text-xs text-slate-400 mt-0.5">
-            Understand every service by functional category with deep-dive educational AI explanations.
+            Understand every service by functional category with live streaming educational AI explanations.
           </p>
         </div>
       </div>
 
       <div className="space-y-3">
         {categorized.map(([category, catPorts]) => {
-          const isExpanded = expandedCategories[category] ?? true; // expanded by default
+          const isExpanded = expandedCategories[category] ?? true;
           const lanCount = catPorts.filter(p => p.isLanPublic).length;
           const hasRisk = catPorts.some(p => p.risk === 'High');
-          const aiExplanation = aiExplanations[category];
+          const aiStream = categoryStreams[category];
+          const thinkingText = categoryThinking[category];
+          const inspectorData = categoryInspector[category];
           const isLoadingAi = loadingCategory === category;
+          const showInspector = activeInspector === category;
 
           return (
             <div
@@ -143,14 +215,14 @@ export const CategoryAccordion: React.FC<CategoryAccordionProps> = ({
                     }}
                     disabled={isLoadingAi}
                     className="px-3 py-1.5 bg-gradient-to-r from-cyan-600/20 to-indigo-600/20 hover:from-cyan-600/30 hover:to-indigo-600/30 text-cyan-300 border border-cyan-500/30 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer"
-                    title="Generate 2-3 line educational explanation of all services in this category"
+                    title="Stream educational explanation of all services in this category"
                   >
                     {isLoadingAi ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-400" />
                     ) : (
                       <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
                     )}
-                    <span className="hidden sm:inline">Ask AI to Explain</span>
+                    <span className="hidden sm:inline">{isLoadingAi ? 'Streaming...' : 'Ask AI to Explain'}</span>
                     <span className="sm:hidden">Explain</span>
                   </button>
 
@@ -163,16 +235,43 @@ export const CategoryAccordion: React.FC<CategoryAccordionProps> = ({
               {/* Accordion Content */}
               {isExpanded && (
                 <div className="px-5 pb-5 pt-1 space-y-3 border-t border-slate-800/60">
+                  {/* Chain of Thought Box */}
+                  {thinkingText && (
+                    <ThinkingBox thinking={thinkingText} isThinking={isLoadingAi} />
+                  )}
+
                   {/* AI Educational Explanation Box */}
-                  {aiExplanation && (
-                    <div className="bg-gradient-to-r from-indigo-950/40 via-slate-900 to-indigo-950/40 border border-indigo-500/30 rounded-xl p-4 text-xs sm:text-sm text-slate-200 leading-relaxed space-y-2">
-                      <div className="flex items-center gap-1.5 text-xs font-bold text-cyan-400">
-                        <Sparkles className="w-4 h-4" />
-                        AI Educational Insights for {category}:
+                  {aiStream && (
+                    <div className="bg-slate-950/80 border border-indigo-500/30 rounded-xl p-4 text-xs sm:text-sm text-slate-200 leading-relaxed space-y-3 shadow-inner">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5 text-xs font-bold text-cyan-400">
+                          <Sparkles className="w-4 h-4" />
+                          <span>AI Educational Insights for {category}:</span>
+                        </div>
+
+                        {inspectorData && (
+                          <button
+                            onClick={() => setActiveInspector(showInspector ? null : category)}
+                            className="text-[11px] font-mono text-slate-400 hover:text-cyan-300 flex items-center gap-1 cursor-pointer"
+                          >
+                            <Terminal className="w-3.5 h-3.5" />
+                            <span>{showInspector ? 'Hide Raw Input' : 'Inspect Input/Prompt'}</span>
+                          </button>
+                        )}
                       </div>
-                      <div className="whitespace-pre-wrap font-sans text-xs sm:text-sm text-slate-300">
-                        {aiExplanation}
-                      </div>
+
+                      {/* Deconstructed Markdown Report with streaming cursor */}
+                      <MarkdownReport content={aiStream} isStreaming={isLoadingAi} />
+
+                      {/* Inline Raw Inspector Drawer */}
+                      {showInspector && inspectorData && (
+                        <div className="mt-3 pt-3 border-t border-slate-800 space-y-2 text-[11px] font-mono text-slate-300 bg-slate-900 p-3 rounded-lg">
+                          <div className="text-slate-400 font-semibold">Raw Input Sent to AI:</div>
+                          <div className="max-h-40 overflow-y-auto whitespace-pre-wrap bg-slate-950 p-2.5 rounded border border-slate-800 text-slate-400">
+                            {inspectorData.userPrompt || JSON.stringify(inspectorData, null, 2)}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
 

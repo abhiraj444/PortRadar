@@ -590,6 +590,7 @@ export function App() {
           setIsAiAuditOpen(false);
           setIsAiSettingsOpen(true);
         }}
+        onUpdateConfig={handleSaveAiConfig}
       />
 
       <AiSettingsModal

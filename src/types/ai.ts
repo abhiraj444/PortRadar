@@ -5,13 +5,15 @@ export interface AiConfig {
   apiKey: string;
   model: string;
   baseUrl?: string;
+  reasoningMode?: boolean;
 }
 
 export const DEFAULT_AI_CONFIG: AiConfig = {
   provider: 'gemini',
   apiKey: '',
   model: 'gemini-2.0-flash',
-  baseUrl: ''
+  baseUrl: '',
+  reasoningMode: false
 };
 
 export const PROVIDER_PRESETS: Record<AiProvider, { label: string; defaultModel: string; placeholderUrl?: string; helpText: string }> = {

@@ -1,4 +1,4 @@
-// Multi-provider LLM handler and prompt crafting engine
+// Multi-provider streaming LLM handler, prompt crafting, and reasoning engine
 
 /**
  * Generates a structured Markdown report from raw port data
@@ -48,9 +48,89 @@ export function generateMarkdownReport(ports, networkInfo = {}) {
 }
 
 /**
- * Unified LLM Dispatcher
+ * System prompt for comprehensive full-network security audit
  */
-export async function callLlm({ provider = 'gemini', apiKey = '', model = '', baseUrl = '', prompt = '', systemPrompt = '' }) {
+export function getAuditSystemPrompt(reasoningMode = false) {
+  let prompt = `You are a Principal Cyber Security Engineer and Computer Networking Architect.
+Your task is to analyze a live markdown audit of open network ports and services running on a personal Windows laptop.
+
+Provide an aesthetic, structured, and easy-to-understand analysis formatted in standard GitHub Flavored Markdown.
+Use clear headings, markdown tables, bullet points, and highlight critical security items.
+
+Format your response with the following clear sections:
+
+### 1. 🛡️ Executive Network Health Summary
+- Overall security posture rating (e.g. Excellent / Good / Needs Attention / High Risk).
+- A clean markdown table summarizing port counts by category and exposure.
+- General impression of what this laptop is primarily doing.
+
+### 2. 🚨 Suspicious, High-Risk, or Exposed Services (Attention Required)
+- Highlight any ports bound to \`0.0.0.0\` (LAN Exposed) that pose potential security risks (e.g. unencrypted FTP, SMB 445 on untrusted Wi-Fi, remote desktop RDP 3389, unauthenticated databases, anomalous executables).
+- For each item, explain in 2-3 sentences:
+  - **What the vulnerability or risk is** (in plain English).
+  - **Attack Vector:** What someone on the same Wi-Fi could do.
+  - **Remediation:** Concrete commands to fix it (e.g. bind to \`127.0.0.1\`, disable Windows service, or add firewall rule).
+
+### 3. ✅ Legitimate & Safe Core Services
+- Reassure the user about normal background processes (e.g. Windows RPC 135, Delivery Optimization 7680, Vite/Node dev servers, DNS).
+- Explain why they are harmless and expected.
+
+### 4. 💡 Top 3 Actionable Recommendations
+- Provide 3 numbered, concrete commands or actions the user can take right now to secure their machine.`;
+
+  if (reasoningMode) {
+    prompt += `\n\nIMPORTANT - CHAIN-OF-THOUGHT REASONING MODE IS ENABLED:
+Before writing the final audit report, you MUST first conduct a deep, rigorous step-by-step internal deliberation wrapped inside <thinking> and </thinking> tags.
+Inside <thinking>...</thinking>:
+- Step 1: Scan all sockets and identify any non-standard listening ports.
+- Step 2: Differentiate 0.0.0.0 (Wi-Fi accessible) from 127.0.0.1 (local only).
+- Step 3: Evaluate each listening daemon for lack of encryption or authentication.
+- Step 4: Formulate the executive rating and top recommendations.
+After the closing </thinking> tag, immediately output the polished Markdown report.`;
+  } else {
+    prompt += `\n\nDo not include internal chain-of-thought scratchpad blocks. Output the formatted report directly.`;
+  }
+
+  return prompt;
+}
+
+/**
+ * System prompt for category drill-downs
+ */
+export function getCategorySystemPrompt(reasoningMode = false) {
+  let prompt = `You are an expert Computer Networking Teacher.
+Your goal is to explain a group of network ports running inside a specific category to a student who wants to understand networking concepts clearly.
+
+For the requested category and each port/service provided:
+1. Provide a brief 2-3 line explanation written in plain, intuitive English.
+2. Explain:
+   - What this service actually does in everyday terms.
+   - Why it is using this specific port.
+   - Whether other people on the local Wi-Fi can see or interact with it.
+3. Keep the styling clean with markdown bullet points and bold keywords.`;
+
+  if (reasoningMode) {
+    prompt += `\n\nWrap your preliminary thought process inside <thinking>...</thinking> tags before providing the final explanation.`;
+  }
+
+  return prompt;
+}
+
+/**
+ * Multi-Provider Real-Time Streaming Dispatcher
+ */
+export async function streamLlm({
+  provider = 'gemini',
+  apiKey = '',
+  model = '',
+  baseUrl = '',
+  systemPrompt = '',
+  prompt = '',
+  reasoningMode = false,
+  onChunk = () => {},
+  onReasoning = () => {},
+  onInputPayload = () => {}
+}) {
   if (!apiKey && provider !== 'ollama') {
     throw new Error(`API key is required for provider "${provider}". Please enter your API key in AI Settings.`);
   }
@@ -66,9 +146,11 @@ export async function callLlm({ provider = 'gemini', apiKey = '', model = '', ba
 
   const selectedModel = model.trim() || defaultModels[provider] || 'gpt-4o-mini';
 
-  // 1. Google Gemini
+  // 1. Google Gemini SSE Streaming
   if (provider === 'gemini') {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${apiKey}`;
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:streamGenerateContent?alt=sse&key=${apiKey}`;
+    const safeEndpoint = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:streamGenerateContent?alt=sse&key=***REDACTED***`;
+    
     const body = {
       contents: [
         {
@@ -81,7 +163,17 @@ export async function callLlm({ provider = 'gemini', apiKey = '', model = '', ba
       }
     };
 
-    const res = await fetch(url, {
+    onInputPayload({
+      provider,
+      model: selectedModel,
+      endpoint: safeEndpoint,
+      reasoningMode,
+      systemPrompt,
+      userPrompt: prompt,
+      timestamp: new Date().toISOString()
+    });
+
+    const res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
@@ -92,21 +184,58 @@ export async function callLlm({ provider = 'gemini', apiKey = '', model = '', ba
       throw new Error(`Gemini API Error (${res.status}): ${errText}`);
     }
 
-    const data = await res.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || 'No response generated from Gemini.';
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data:')) continue;
+        const dataStr = trimmed.replace(/^data:\s*/, '');
+        if (dataStr === '[DONE]') continue;
+
+        try {
+          const parsed = JSON.parse(dataStr);
+          const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) onChunk(text);
+        } catch {
+          // ignore partial JSON chunk
+        }
+      }
+    }
+    return;
   }
 
-  // 2. Anthropic Claude
+  // 2. Anthropic Claude Streaming
   if (provider === 'anthropic') {
-    const url = 'https://api.anthropic.com/v1/messages';
+    const endpoint = 'https://api.anthropic.com/v1/messages';
     const body = {
       model: selectedModel,
       max_tokens: 4096,
+      stream: true,
       system: systemPrompt,
       messages: [{ role: 'user', content: prompt }]
     };
 
-    const res = await fetch(url, {
+    onInputPayload({
+      provider,
+      model: selectedModel,
+      endpoint,
+      reasoningMode,
+      systemPrompt,
+      userPrompt: prompt,
+      timestamp: new Date().toISOString()
+    });
+
+    const res = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -121,11 +250,42 @@ export async function callLlm({ provider = 'gemini', apiKey = '', model = '', ba
       throw new Error(`Anthropic API Error (${res.status}): ${errText}`);
     }
 
-    const data = await res.json();
-    return data.content?.[0]?.text || 'No response generated from Claude.';
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data:')) continue;
+        const dataStr = trimmed.replace(/^data:\s*/, '');
+        if (dataStr === '[DONE]') continue;
+
+        try {
+          const parsed = JSON.parse(dataStr);
+          if (parsed.type === 'content_block_delta') {
+            if (parsed.delta?.type === 'thinking_delta' && parsed.delta?.thinking) {
+              onReasoning(parsed.delta.thinking);
+            } else if (parsed.delta?.text) {
+              onChunk(parsed.delta.text);
+            }
+          }
+        } catch {
+          // ignore partial JSON
+        }
+      }
+    }
+    return;
   }
 
-  // 3. OpenAI-Compatible Providers (OpenAI, Groq, Ollama, OpenRouter, Custom)
+  // 3. OpenAI-Compatible Streaming (OpenAI, Groq, OpenRouter, Ollama, Custom)
   let endpoint = '';
   const headers = { 'Content-Type': 'application/json' };
 
@@ -153,8 +313,19 @@ export async function callLlm({ provider = 'gemini', apiKey = '', model = '', ba
       { role: 'system', content: systemPrompt },
       { role: 'user', content: prompt }
     ],
+    stream: true,
     temperature: 0.2
   };
+
+  onInputPayload({
+    provider,
+    model: selectedModel,
+    endpoint,
+    reasoningMode,
+    systemPrompt,
+    userPrompt: prompt,
+    timestamp: new Date().toISOString()
+  });
 
   const res = await fetch(endpoint, {
     method: 'POST',
@@ -167,50 +338,39 @@ export async function callLlm({ provider = 'gemini', apiKey = '', model = '', ba
     throw new Error(`${provider.toUpperCase()} API Error (${res.status}): ${errText}`);
   }
 
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content || 'No response generated.';
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith('data:')) continue;
+      const dataStr = trimmed.replace(/^data:\s*/, '');
+      if (dataStr === '[DONE]') continue;
+
+      try {
+        const parsed = JSON.parse(dataStr);
+        const delta = parsed.choices?.[0]?.delta;
+        if (!delta) continue;
+
+        // Check if delta contains reasoning_content (DeepSeek-R1 / o3 / qwq)
+        if (delta.reasoning_content) {
+          onReasoning(delta.reasoning_content);
+        }
+        if (delta.content) {
+          onChunk(delta.content);
+        }
+      } catch {
+        // ignore partial JSON
+      }
+    }
+  }
 }
-
-/**
- * System prompt for comprehensive full-network security audit
- */
-export const AUDIT_SYSTEM_PROMPT = `You are a Principal Cyber Security Engineer and Computer Networking Architect.
-Your task is to analyze a live markdown audit of open network ports and services running on a personal Windows laptop.
-
-Provide an aesthetic, structured, and easy-to-understand analysis using Markdown.
-Format your response with the following clear sections:
-
-### 1. 🛡️ Executive Network Health Summary
-- Overall security posture rating (e.g. Excellent / Good / Needs Attention / High Risk).
-- Summary count of safe vs potentially dangerous ports.
-- General impression of what this laptop is primarily doing (e.g., software development, media streaming, system utilities).
-
-### 2. 🚨 Suspicious, High-Risk, or Exposed Services (Attention Required)
-- Highlight any ports bound to \`0.0.0.0\` (LAN Exposed) that pose potential security risks (e.g. unencrypted FTP, SMB 445 file sharing on untrusted Wi-Fi, remote desktop RDP 3389, unauthenticated databases like Redis/Mongo, unknown or anomalous executables).
-- For each item, explain in 2-3 sentences:
-  - **What the vulnerability or risk is** (in plain English).
-  - **Attack Vector:** What someone on the same Wi-Fi could do.
-  - **Remediation:** How to fix it (e.g. bind to \`127.0.0.1\`, disable Windows service, or add firewall rule).
-
-### 3. ✅ Legitimate & Safe Core Services
-- Reassure the user about normal background processes (e.g. Windows RPC 135, Delivery Optimization 7680, Vite/Node dev servers, DNS).
-- Explain why they are harmless and expected.
-
-### 4. 💡 Top 3 Actionable Recommendations
-- Provide 3 numbered, concrete commands or actions the user can take right now to secure their machine.
-
-Maintain an encouraging, educational tone that demystifies computer networking for beginners while providing professional security rigor.`;
-
-/**
- * System prompt for category drill-downs
- */
-export const CATEGORY_SYSTEM_PROMPT = `You are an expert Computer Networking Teacher.
-Your goal is to explain a group of network ports running inside a specific category to a student who wants to understand networking concepts clearly.
-
-For the requested category and each port/service provided:
-1. Provide a brief 2-3 line explanation written in plain, intuitive English.
-2. Explain:
-   - What this service actually does in everyday terms.
-   - Why it is using this specific port.
-   - Whether other people on the local Wi-Fi can see or interact with it.
-3. Keep the styling clean with markdown bullet points and bold keywords.`;
