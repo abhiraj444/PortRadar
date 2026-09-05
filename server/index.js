@@ -1,0 +1,436 @@
+import express from 'express';
+import cors from 'cors';
+import { exec } from 'child_process';
+import os from 'os';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import QRCode from 'qrcode';
+import { explainPort, PORT_DATABASE, PROCESS_DATABASE } from './portDatabase.js';
+import { generateMarkdownReport, callLlm, AUDIT_SYSTEM_PROMPT, CATEGORY_SYSTEM_PROMPT } from './ai.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const app = express();
+const PORT = process.env.PORT || 8989;
+
+app.use(cors());
+app.use(express.json());
+
+// In-memory scan cache (valid for 1.5 seconds)
+let cache = {
+  timestamp: 0,
+  data: null
+};
+
+/**
+ * Get all available network IPv4 interfaces and QR codes
+ */
+async function getNetworkInterfaces() {
+  const nets = os.networkInterfaces();
+  const results = [];
+  const hostname = os.hostname();
+
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name] || []) {
+      // Pick IPv4 non-internal or Tailscale/VPN IPs
+      if (net.family === 'IPv4') {
+        const isLocalhost = net.internal || net.address === '127.0.0.1';
+        const url = `http://${net.address}:${PORT}`;
+        let qrCode = '';
+        try {
+          qrCode = await QRCode.toDataURL(url, { width: 220, margin: 1 });
+        } catch {
+          // ignore qr error
+        }
+
+        results.push({
+          name,
+          address: net.address,
+          url,
+          isLocalhost,
+          isLan: !isLocalhost && !net.address.startsWith('169.254.'),
+          qrCode
+        });
+      }
+    }
+  }
+
+  // Prioritize primary LAN IP (e.g. 192.168.x.x or 10.x.x.x)
+  const primary = results.find(r => r.isLan && (r.address.startsWith('192.168.') || r.address.startsWith('10.'))) ||
+                  results.find(r => r.isLan) ||
+                  results[0];
+
+  return {
+    hostname,
+    port: PORT,
+    primaryUrl: primary ? primary.url : `http://localhost:${PORT}`,
+    primaryIp: primary ? primary.address : '127.0.0.1',
+    primaryQr: primary ? primary.qrCode : '',
+    interfaces: results
+  };
+}
+
+/**
+ * Fetch process map using Windows tasklist
+ */
+function getProcessMap() {
+  return new Promise((resolve) => {
+    exec('cmd.exe /c "tasklist /fo csv /nh"', { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+      const processMap = new Map();
+      if (err || !stdout) {
+        return resolve(processMap);
+      }
+
+      const lines = stdout.split('\r\n');
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        // Tasklist CSV format: "Image Name","PID","Session Name","Session#","Mem Usage"
+        const parts = line.split('","').map(p => p.replace(/^"|"$/g, ''));
+        if (parts.length >= 5) {
+          const name = parts[0];
+          const pid = parseInt(parts[1], 10);
+          const session = parts[2];
+          const memory = parts[4];
+          if (!isNaN(pid)) {
+            processMap.set(pid, { name, memory, session });
+          }
+        }
+      }
+      resolve(processMap);
+    });
+  });
+}
+
+/**
+ * Parse Windows netstat -ano output
+ */
+function parseNetstat(stdout, processMap) {
+  const lines = stdout.split('\r\n');
+  const ports = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('Active') || trimmed.startsWith('Proto')) continue;
+
+    // e.g. TCP    0.0.0.0:80             0.0.0.0:0              LISTENING       4
+    // e.g. TCP    [::]:80                [::]:0                 LISTENING       4
+    // e.g. UDP    0.0.0.0:5353           *:*                                    3428
+    const tokens = trimmed.split(/\s+/);
+    if (tokens.length < 4) continue;
+
+    const proto = tokens[0].toUpperCase();
+    const local = tokens[1];
+    let foreign = '';
+    let state = 'LISTENING';
+    let pidStr = '';
+
+    if (proto === 'TCP') {
+      foreign = tokens[2];
+      state = tokens[3];
+      pidStr = tokens[4];
+    } else if (proto === 'UDP') {
+      foreign = tokens[2];
+      state = 'LISTENING'; // UDP sockets in netstat represent listening endpoints
+      pidStr = tokens[3];
+    }
+
+    const pid = parseInt(pidStr, 10);
+    if (isNaN(pid)) continue;
+
+    // Extract port from local address
+    const lastColon = local.lastIndexOf(':');
+    if (lastColon === -1) continue;
+
+    const localAddress = local.substring(0, lastColon);
+    const localPort = parseInt(local.substring(lastColon + 1), 10);
+    if (isNaN(localPort)) continue;
+
+    // Process info
+    let proc = processMap.get(pid);
+    if (!proc) {
+      if (pid === 4) {
+        proc = { name: 'System', memory: 'N/A', session: 'Kernel' };
+      } else if (pid === 0) {
+        proc = { name: 'System Idle Process', memory: '0 K', session: 'System' };
+      } else {
+        proc = { name: 'Unknown', memory: 'Unknown', session: 'Unknown' };
+      }
+    }
+
+    const explanation = explainPort(localPort, proc.name, localAddress);
+
+    ports.push({
+      id: `${proto}-${localAddress}-${localPort}-${pid}`,
+      proto,
+      localAddress,
+      localPort,
+      foreignAddress: foreign,
+      state,
+      pid,
+      processName: proc.name,
+      memory: proc.memory,
+      session: proc.session,
+      ...explanation
+    });
+  }
+
+  // Deduplicate and prioritize LISTENING states
+  const map = new Map();
+  for (const item of ports) {
+    const key = `${item.proto}:${item.localPort}:${item.localAddress}`;
+    if (!map.has(key) || (item.state === 'LISTENING' && map.get(key).state !== 'LISTENING')) {
+      map.set(key, item);
+    }
+  }
+
+  return Array.from(map.values()).sort((a, b) => a.localPort - b.localPort);
+}
+
+/**
+ * Scan all active ports
+ */
+async function scanPorts() {
+  const now = Date.now();
+  if (cache.data && now - cache.timestamp < 1500) {
+    return cache.data;
+  }
+
+  const processMap = await getProcessMap();
+
+  return new Promise((resolve) => {
+    exec('cmd.exe /c "netstat -ano"', { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+      if (err || !stdout) {
+        return resolve({ ports: [], stats: {} });
+      }
+
+      const ports = parseNetstat(stdout, processMap);
+
+      const listeningPorts = ports.filter(p => p.state === 'LISTENING');
+      const lanExposed = listeningPorts.filter(p => p.isLanPublic);
+      const localhostOnly = listeningPorts.filter(p => !p.isLanPublic);
+      const established = ports.filter(p => p.state === 'ESTABLISHED');
+      const uniqueProcesses = new Set(ports.map(p => p.processName)).size;
+
+      const result = {
+        ports,
+        timestamp: new Date().toISOString(),
+        stats: {
+          total: ports.length,
+          listening: listeningPorts.length,
+          lanExposed: lanExposed.length,
+          localhostOnly: localhostOnly.length,
+          established: established.length,
+          processes: uniqueProcesses
+        }
+      };
+
+      cache = {
+        timestamp: now,
+        data: result
+      };
+
+      resolve(result);
+    });
+  });
+}
+
+// REST Endpoints
+app.get('/api/network', async (_req, res) => {
+  try {
+    const networkInfo = await getNetworkInterfaces();
+    res.json(networkInfo);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/ports', async (_req, res) => {
+  try {
+    const data = await scanPorts();
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/explain/:port', (req, res) => {
+  const port = parseInt(req.params.port, 10);
+  const processName = req.query.process || '';
+  const localAddress = req.query.address || '0.0.0.0';
+  const explanation = explainPort(port, processName, localAddress);
+  res.json(explanation);
+});
+
+app.post('/api/kill', (req, res) => {
+  const { pid } = req.body;
+  const numPid = parseInt(pid, 10);
+
+  if (isNaN(numPid)) {
+    return res.status(400).json({ error: 'Invalid PID' });
+  }
+
+  // Security safeguards: Prevent killing system kernel or own server process
+  if (numPid <= 4 || numPid === process.pid) {
+    return res.status(403).json({
+      error: `Safety Protection: Cannot kill protected system PID ${numPid} or the PortRadar dashboard itself.`
+    });
+  }
+
+  exec(`taskkill /F /PID ${numPid}`, (err, stdout, stderr) => {
+    if (err) {
+      return res.status(500).json({
+        error: `Failed to terminate PID ${numPid}: ${stderr || err.message}`
+      });
+    }
+
+    // Invalidate cache immediately so UI reflects freed port
+    cache.data = null;
+    res.json({
+      success: true,
+      message: `Process PID ${numPid} terminated successfully.`,
+      output: stdout
+    });
+  });
+});
+
+// Export current ports as clean Markdown file
+app.get('/api/export/markdown', async (_req, res) => {
+  try {
+    const data = await scanPorts();
+    const networkInfo = await getNetworkInterfaces();
+    const markdown = generateMarkdownReport(data.ports, networkInfo);
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="portradar-audit.md"');
+    res.send(markdown);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// AI Network Security Audit (All-in-one analysis)
+app.post('/api/ai/audit', async (req, res) => {
+  try {
+    const { config } = req.body || {};
+    if (!config) {
+      return res.status(400).json({ error: 'AI configuration is required.' });
+    }
+
+    const data = await scanPorts();
+    const networkInfo = await getNetworkInterfaces();
+    const rawMarkdown = generateMarkdownReport(data.ports, networkInfo);
+
+    const userPrompt = `Here is the live Markdown port audit of my host machine:\n\n\`\`\`markdown\n${rawMarkdown}\n\`\`\`\n\nPlease evaluate this network dump according to your instructions.`;
+
+    const auditMarkdown = await callLlm({
+      provider: config.provider,
+      apiKey: config.apiKey,
+      model: config.model,
+      baseUrl: config.baseUrl,
+      systemPrompt: AUDIT_SYSTEM_PROMPT,
+      prompt: userPrompt
+    });
+
+    res.json({
+      success: true,
+      auditMarkdown,
+      rawMarkdown,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// AI Category Drill-down explanation
+app.post('/api/ai/category', async (req, res) => {
+  try {
+    const { config, category, ports } = req.body || {};
+    if (!config || !category || !ports) {
+      return res.status(400).json({ error: 'Configuration, category, and ports list are required.' });
+    }
+
+    const portSummary = ports.map(p => 
+      `- Port ${p.localPort} (${p.proto}): Process \`${p.processName}\` (PID: ${p.pid}), Local Address: \`${p.localAddress}\`, Status: ${p.isLanPublic ? 'LAN Exposed' : 'Localhost Only'}, Title: "${p.title}", Description: "${p.description}"`
+    ).join('\n');
+
+    const prompt = `Category: "${category}"\n\nActive ports running in this category on this laptop:\n${portSummary}\n\nPlease explain what each service does in 2-3 plain-English lines, why it runs, and whether people on the local Wi-Fi can see or use it.`;
+
+    const explanation = await callLlm({
+      provider: config.provider,
+      apiKey: config.apiKey,
+      model: config.model,
+      baseUrl: config.baseUrl,
+      systemPrompt: CATEGORY_SYSTEM_PROMPT,
+      prompt
+    });
+
+    res.json({
+      success: true,
+      category,
+      explanation
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// AI Configuration Test Endpoint
+app.post('/api/ai/test', async (req, res) => {
+  try {
+    const { config } = req.body || {};
+    if (!config) {
+      return res.status(400).json({ error: 'Configuration required.' });
+    }
+
+    const result = await callLlm({
+      provider: config.provider,
+      apiKey: config.apiKey,
+      model: config.model,
+      baseUrl: config.baseUrl,
+      systemPrompt: 'You are a test connection assistant. Answer in under 5 words.',
+      prompt: 'Verify connection. Say "Connection established successfully!"'
+    });
+
+    res.json({
+      success: true,
+      message: result
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Serve frontend build if available
+const distPath = path.join(__dirname, '..', 'dist');
+app.use(express.static(distPath));
+
+// Catch-all route for SPA fallback
+app.use((_req, res) => {
+  res.sendFile(path.join(distPath, 'index.html'), (err) => {
+    if (err) {
+      res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head><title>PortRadar API Server</title></head>
+        <body style="font-family: sans-serif; background: #0f172a; color: #f8fafc; padding: 40px; text-align: center;">
+          <h1 style="color: #38bdf8;">⚡ PortRadar Backend is Live!</h1>
+          <p>The API server is running. Frontend static files are building or ready.</p>
+          <p><a href="/api/network" style="color: #38bdf8;">/api/network</a> | <a href="/api/ports" style="color: #38bdf8;">/api/ports</a></p>
+        </body>
+        </html>
+      `);
+    }
+  });
+});
+
+app.listen(PORT, '0.0.0.0', async () => {
+  const network = await getNetworkInterfaces();
+  console.log('================================================================');
+  console.log('⚡ PORTRADAR - LOCAL NETWORK PORT VISUALIZER & EXPLAINER');
+  console.log('================================================================');
+  console.log(`> Localhost Access:       http://localhost:${PORT}`);
+  console.log(`> Local Network (LAN):    ${network.primaryUrl}`);
+  console.log(`> All Devices on Wi-Fi can view this page via the LAN URL!`);
+  console.log('================================================================\n');
+});
